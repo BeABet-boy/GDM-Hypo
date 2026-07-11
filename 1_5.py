@@ -189,7 +189,7 @@ def _c(t,*c): return (''.join(c)+str(t)+_E) if _sys.stdout.isatty() else str(t)
 
 # logging 双通道：终端=INFO+，文件=DEBUG+
 import logging as _L, os as _O
-def _setup_log(f='analysis_run.log'):
+def _setup_log(f='dataset/analysis_run.log'):
     lg = _L.getLogger('gdm')
     if lg.handlers: return lg
     lg.setLevel(_L.DEBUG)
@@ -5083,8 +5083,8 @@ def analyze_dynamic_thyroid_control(analysis_data, pvalue_registry=None):
     return results_dict
 
 
-def analyze_from_saved_data(input_file='preprocessed_data.xlsx',
-                             output_file='analysis_results.xlsx'):
+def analyze_from_saved_data(input_file='dataset/preprocessed_data.xlsx',
+                             output_file='dataset/analysis_results.xlsx'):
     _info("\n"+"\u2550"*58); _info(_c("  GDM-OGTT 分析  启动",_B)); _info("\u2550"*58)
 
     analysis_data = pd.read_excel(input_file)
@@ -8382,7 +8382,7 @@ def run_shap_analysis(analysis_data, output_dir=None):
         all_results[out] = imp_df
 
     if all_results:
-        shap_excel_path = os.path.join(os.path.dirname(output_dir), 'shap_importance.xlsx')
+        shap_excel_path = os.path.join(os.path.dirname(output_dir), 'dataset/shap_importance.xlsx')
         with pd.ExcelWriter(shap_excel_path) as writer:
             for out, df_imp in all_results.items():
                 sheet_name = outcome_names.get(out, out)[:31]
@@ -8396,6 +8396,6 @@ def run_shap_analysis(analysis_data, output_dir=None):
 
 if __name__ == '__main__':
     base_dir    = os.path.dirname(os.path.abspath(__file__))
-    input_file  = os.path.join(base_dir, 'preprocessed_data.xlsx')
-    output_file = os.path.join(base_dir, 'analysis_results.xlsx')
+    input_file  = os.path.join(base_dir, 'dataset/preprocessed_data.xlsx')
+    output_file = os.path.join(base_dir, 'dataset/analysis_results.xlsx')
     analyze_from_saved_data(input_file, output_file)

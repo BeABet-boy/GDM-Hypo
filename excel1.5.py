@@ -1116,7 +1116,7 @@ def reorder_columns(df):
 # 9. 主入口
 # ===========================================================================
 
-def run_pipeline(source_files, drug_file, output_path='preprocessed_data.xlsx'):
+def run_pipeline(source_files, drug_file, output_path='dataset/preprocessed_data.xlsx'):
     """
     端到端数据提取与预处理流水线。
 
@@ -1234,12 +1234,12 @@ def run_pipeline(source_files, drug_file, output_path='preprocessed_data.xlsx'):
 if __name__ == '__main__':
 
     SOURCE_FILES = [
-        (r"22.xlsx", '2022'),
-        (r"23.xlsx", '2023'),
-        (r"24.xlsx", '2024'),
-        (r"25.xlsx", '2025'),
+        (r"dataset/22.xlsx", '2022'),
+        (r"dataset/23.xlsx", '2023'),
+        (r"dataset/24.xlsx", '2024'),
+        (r"dataset/25.xlsx", '2025'),
     ]
-    DRUG_FILE   = r"优甲乐提取表.xlsx"
-    OUTPUT_FILE = "preprocessed_data.xlsx"
+    DRUG_FILE   = r"dataset/优甲乐提取表.xlsx"
+    OUTPUT_FILE = "dataset/preprocessed_data.xlsx"
 
     result = run_pipeline(SOURCE_FILES, DRUG_FILE, OUTPUT_FILE)
