@@ -384,6 +384,22 @@ def extract_one_patient(ID, group):
     # ========== 基于检测时间反推孕周来修正分娩孕周（带缓冲、上限、触发阈值） ==========
     # 仅使用 GA_CORRECTION_ITEM_NAMES 白名单内的检验项目（即下游实际用到孕周的几类检验），
     # 避免被该患者其他无关检验（血常规/尿常规等）中可能存在的“检测时间”录入错误带偏。
+
+    # ---- 保存原始分娩孕周，并收集白名单项目的原始检测时孕周 ----
+    original_ga_delivery = rec.get('ga_delivery')   # 初始值（可能为 NaN）
+    min_ga_raw_detected = np.nan
+    ga_raw_values = []
+
+    # 收集所有相关行的原始“检测时孕周”（无论是否有检测时间）
+    if '检测时间' in group.columns and '明细名称' in group.columns:
+        relevant_rows = group[group['明细名称'].isin(GA_CORRECTION_ITEM_NAMES)]
+        for _, row in relevant_rows.iterrows():
+            ga_raw = pd.to_numeric(row.get('检测时孕周'), errors='coerce')
+            if pd.notna(ga_raw):
+                ga_raw_values.append(ga_raw)
+        if ga_raw_values:
+            min_ga_raw_detected = min(ga_raw_values)
+
     birth_dt = rec.get('birth_date')
     if birth_dt is not None and pd.notna(birth_dt):
         candidates = []   # (ga_calc, dt, item_name, ga_raw_source)
@@ -706,12 +722,12 @@ def extract_one_patient(ID, group):
     if len(tsh_rows):
         tsh_rows['_dt'] = tsh_rows['检测时间'].apply(safe_datetime)
         tsh_rows['_val'] = pd.to_numeric(tsh_rows['数字结果'], errors='coerce')
-        tsh_rows['_ga']  = pd.to_numeric(tsh_rows['检测时孕周'], errors='coerce') if '检测时孕周' in tsh_rows.columns else np.nan
+        tsh_rows['_ga'] = pd.to_numeric(tsh_rows['检测时孕周'], errors='coerce') if '检测时孕周' in tsh_rows.columns else np.nan
         tsh_rows = tsh_rows.dropna(subset=['_val'])
         tsh_rows = tsh_rows.drop_duplicates(subset=['检测时间'], keep='first')
-        tsh_dated   = tsh_rows[tsh_rows['_dt'].notna()].sort_values('_dt')
+        tsh_dated = tsh_rows[tsh_rows['_dt'].notna()].sort_values('_dt')
         tsh_undated = tsh_rows[tsh_rows['_dt'].isna()]
-        tsh_sorted  = pd.concat([tsh_dated, tsh_undated], ignore_index=True)
+        tsh_sorted = pd.concat([tsh_dated, tsh_undated], ignore_index=True)
 
         for _, row in tsh_sorted.iterrows():
             dt = row['_dt']
@@ -729,7 +745,7 @@ def extract_one_patient(ID, group):
     if len(ft4_rows):
         ft4_rows['_dt'] = ft4_rows['检测时间'].apply(safe_datetime)
         ft4_rows['_val'] = pd.to_numeric(ft4_rows['数字结果'], errors='coerce')
-        # FT4 源数据无独立的"检测时孕周"列，直接用 ga_delivery - days/7 反推
+        ft4_rows['_ga'] = pd.to_numeric(ft4_rows['检测时孕周'], errors='coerce') if '检测时孕周' in ft4_rows.columns else np.nan
         ft4_rows = ft4_rows.dropna(subset=['_val'])
         ft4_rows = ft4_rows.drop_duplicates(subset=['检测时间'], keep='first')
         ft4_dated = ft4_rows[ft4_rows['_dt'].notna()].sort_values('_dt')
@@ -739,16 +755,8 @@ def extract_one_patient(ID, group):
         for _, row in ft4_sorted.iterrows():
             dt = row['_dt']
             val = row['_val']
-            # 计算 FT4 的孕周（反推）
-            if birth_date_ is not None and dt is not None and pd.notna(ga_delivery_):
-                days_diff = (birth_date_ - dt).days
-                if days_diff >= 0:
-                    ga_calc = float(ga_delivery_) - days_diff / 7.0
-                    ga = round(ga_calc, 2) if 0 < ga_calc <= 42 else np.nan
-                else:
-                    ga = np.nan
-            else:
-                ga = np.nan
+            ga_source = row['_ga']
+            ga = compute_ga_preferred(birth_date_, dt, ga_delivery_, ga_source)
             ft4_records.append((dt, val, ga))
 
     # ------------------------------------------------------------------
