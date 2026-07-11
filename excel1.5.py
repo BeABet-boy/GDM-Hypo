@@ -434,6 +434,32 @@ def extract_one_patient(ID, group):
             else:
                 rec.setdefault('ga_delivery_corrected', False)
 
+    current_ga = rec.get('ga_delivery')
+    if pd.notna(current_ga) and pd.notna(min_ga_raw_detected):
+        added = 0
+        if current_ga <= 38.86 and min_ga_raw_detected < 4:
+            added = 3
+        elif current_ga <= 39.86 and min_ga_raw_detected < 3:
+            added = 2
+        elif current_ga <= 40.86 and min_ga_raw_detected < 2:
+            added = 1
+
+        if added > 0:
+            rec['ga_delivery_before_rule'] = current_ga
+            rec['ga_delivery'] = round(current_ga + added, 2)
+            rec['ga_delivery_rule_adjustment'] = True
+            rec['ga_delivery_adjustment_amount'] = added
+        else:
+            rec['ga_delivery_rule_adjustment'] = False
+            rec['ga_delivery_adjustment_amount'] = 0
+    else:
+        rec['ga_delivery_rule_adjustment'] = False
+        rec['ga_delivery_adjustment_amount'] = 0
+
+    # 记录原始值及检测到的最小孕周（便于追溯）
+    rec['ga_delivery_original'] = original_ga_delivery
+    rec['min_ga_raw_detected'] = min_ga_raw_detected
+
     # ------------------------------------------------------------------
     # 4.2 孕前 BMI（从体征文本中正则提取）
     # ------------------------------------------------------------------
