@@ -2542,7 +2542,7 @@ def _plot_forest(strata_df, outcome_var, p_interaction=None):
     """
     try:
         base_dir   = os.path.dirname(os.path.abspath(__file__))
-        output_dir = os.path.join(base_dir, "输出图", "forest")
+        output_dir = os.path.join(base_dir, "dataset/输出图", "forest")
         os.makedirs(output_dir, exist_ok=True)
 
         # ── 数据分离：可靠行 vs 双零事件行 ───────────────────────
@@ -3248,7 +3248,7 @@ def perform_rcs_analysis(analysis_data, outcome_var,
 
     if output_dir is None:
         output_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), '输出图', 'rcs')
+            os.path.dirname(os.path.abspath(__file__)), 'dataset/输出图', 'rcs')
     os.makedirs(output_dir, exist_ok=True)
 
     if covariates is None:
@@ -3845,7 +3845,7 @@ def run_rcs_main(analysis_data, pvalue_registry=None, output_dir=None):
     import os
     if output_dir is None:
         output_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), '输出图', 'rcs')
+            os.path.dirname(os.path.abspath(__file__)), 'dataset/输出图', 'rcs')
 
     _sec("RCS 连续暴露分析（第二层主分析）")
     all_rcs = {}
@@ -4277,7 +4277,7 @@ def analyze_comorbidity_groups(analysis_data, pvalue_registry=None,
     import os as _os
     if output_dir is None:
         output_dir = _os.path.join(
-            _os.path.dirname(_os.path.abspath(__file__)), '输出图', 'forest')
+            _os.path.dirname(_os.path.abspath(__file__)), 'dataset/输出图', 'forest')
     _os.makedirs(output_dir, exist_ok=True)
 
     _sec("目标 1：单病 vs 共病 四组对比", lv=1)
@@ -5501,7 +5501,7 @@ def analyze_from_saved_data(input_file='dataset/preprocessed_data.xlsx',
 
     _info("\n[SHAP 分析]")
     try:
-        run_shap_analysis(analysis_data, output_dir=_paper_out)
+        run_shap_analysis(analysis_data)
     except Exception as _e_shap:
         _warn(f"  SHAP 分析失败（不影响主结果）: {_e_shap}")
 
@@ -6928,7 +6928,6 @@ def _collect_paper_figures(all_rcs_results, base_output_dir):
         if not os.path.isfile(src):
             _dbg(f"  [skip] {fname} not found at {src}")
             continue
-        os.makedirs(os.path.dirname(os.path.join(paper_dir, fname)), exist_ok=True)
         dst = os.path.join(paper_dir, f'Fig{fig_num}_{os.path.basename(fname)}')
         shutil.copy2(src, dst)
         copied.append(f'Fig{fig_num}: {desc}')
@@ -6985,7 +6984,7 @@ def plot_spline_curve(df, continuous_var, outcome_var,
     knots          : RCS 节点数（与 test_linearity_rcs 一致）
     outcome_label  : 图中结局名称（中文，如 '巨大儿'）
     var_label      : 图中 x 轴标签（如 'OGTT 空腹血糖（mmol/L）'）
-    output_dir     : 图片保存目录（默认脚本所在目录/输出图）
+    output_dir     : 图片保存目录（默认脚本所在目录/dataset/输出图）
     """
     import patsy
 
@@ -7161,7 +7160,7 @@ def plot_spline_curve(df, continuous_var, outcome_var,
     # ── 保存 ──────────────────────────────────────────────────
     if output_dir is None:
         base_dir   = os.path.dirname(os.path.abspath(__file__))
-        output_dir = os.path.join(base_dir, '输出图', 'rcs')
+        output_dir = os.path.join(base_dir, 'dataset/输出图', 'rcs')
     os.makedirs(output_dir, exist_ok=True)
 
     fname = f'spline_{continuous_var}_{outcome_var}.png'
@@ -7364,7 +7363,7 @@ def plot_lga_sga_figure(analysis_data, ordinal_results=None, output_dir=None):
     import os
     if output_dir is None:
         base_dir   = os.path.dirname(os.path.abspath(__file__))
-        output_dir = os.path.join(base_dir, '输出图', 'phenotype')
+        output_dir = os.path.join(base_dir, 'dataset/输出图', 'phenotype')
     os.makedirs(output_dir, exist_ok=True)
 
     if 'lga_sga' not in analysis_data.columns or 'phenotype3' not in analysis_data.columns:
@@ -7536,7 +7535,7 @@ def plot_levothyroxine_dose_response(all_results, output_dir=None):
     import os
     if output_dir is None:
         base_dir   = os.path.dirname(os.path.abspath(__file__))
-        output_dir = os.path.join(base_dir, '输出图', 'dose')
+        output_dir = os.path.join(base_dir, 'dataset/输出图', 'dose')
     os.makedirs(output_dir, exist_ok=True)
 
     # 收集所有结局的优甲乐剂量组结果
@@ -7993,7 +7992,7 @@ def plot_combined_thyroid_forest(all_results, output_dir=None):
     """
     if output_dir is None:
         base_dir   = os.path.dirname(os.path.abspath(__file__))
-        output_dir = os.path.join(base_dir, '输出图', 'forest')
+        output_dir = os.path.join(base_dir, 'dataset/输出图', 'forest')
     os.makedirs(output_dir, exist_ok=True)
 
     # ── 收集数据 ─────────────────────────────────────────────
@@ -8213,7 +8212,7 @@ def run_shap_analysis(analysis_data, output_dir=None):
 
     if output_dir is None:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        output_dir = os.path.join(base_dir, '输出图', 'shap')
+        output_dir = os.path.join(base_dir, 'dataset/输出图', 'shap')
     os.makedirs(output_dir, exist_ok=True)
 
     try:
