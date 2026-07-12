@@ -8381,14 +8381,14 @@ def run_shap_analysis(analysis_data, output_dir=None):
         all_results[out] = imp_df
 
     if all_results:
-        shap_excel_path = os.path.join(os.path.dirname(output_dir), 'dataset/shap_importance.xlsx')
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        shap_excel_path = os.path.join(base_dir, 'dataset', 'shap_importance.xlsx')
+        os.makedirs(os.path.dirname(shap_excel_path), exist_ok=True)
         with pd.ExcelWriter(shap_excel_path) as writer:
             for out, df_imp in all_results.items():
                 sheet_name = outcome_names.get(out, out)[:31]
                 df_imp.to_excel(writer, sheet_name=sheet_name, index=False)
         _info(f"\n  SHAP 特征重要性表已保存: {shap_excel_path}")
-    else:
-        _warn("  SHAP 分析未生成任何有效结果")
 
     return all_results
 
