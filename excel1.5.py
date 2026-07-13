@@ -22,7 +22,7 @@ FT4_PAIR_WINDOW_DAYS = 7
 
 MIN_GA_AT_FIRST_TEST   = 0.14    # 临床上首次产检抽血孕周下限缓冲
 MAX_PLAUSIBLE_GA       = 43.0   # 分娩孕周合理上限，超出更可能是检测时间录入错误
-MIN_CORRECTION_GAP     = 0.11    # 触发阈值：小于此值的差异视为计孕周惯例噪音，不修正
+MIN_CORRECTION_GAP     = 0.28    # 触发阈值：小于此值的差异视为计孕周惯例噪音，不修正
 
 # 仅这些检验项目的"检测时间"会参与 ga_delivery 反推修正
 # （对应下游实际使用孕周的字段：fbg_ga_*、ogtt0/1/2_ga_*（共同决定 ga_ogtt）、tsh_ga_*、ft4_ga_*）
@@ -384,22 +384,6 @@ def extract_one_patient(ID, group):
     # ========== 基于检测时间反推孕周来修正分娩孕周（带缓冲、上限、触发阈值） ==========
     # 仅使用 GA_CORRECTION_ITEM_NAMES 白名单内的检验项目（即下游实际用到孕周的几类检验），
     # 避免被该患者其他无关检验（血常规/尿常规等）中可能存在的“检测时间”录入错误带偏。
-
-    # ---- 保存原始分娩孕周，并收集白名单项目的原始检测时孕周 ----
-    original_ga_delivery = rec.get('ga_delivery')   # 初始值（可能为 NaN）
-    min_ga_raw_detected = np.nan
-    ga_raw_values = []
-
-    # 收集所有相关行的原始“检测时孕周”（无论是否有检测时间）
-    if '检测时间' in group.columns and '明细名称' in group.columns:
-        relevant_rows = group[group['明细名称'].isin(GA_CORRECTION_ITEM_NAMES)]
-        for _, row in relevant_rows.iterrows():
-            ga_raw = pd.to_numeric(row.get('检测时孕周'), errors='coerce')
-            if pd.notna(ga_raw):
-                ga_raw_values.append(ga_raw)
-        if ga_raw_values:
-            min_ga_raw_detected = min(ga_raw_values)
-
     birth_dt = rec.get('birth_date')
     if birth_dt is not None and pd.notna(birth_dt):
         candidates = []   # (ga_calc, dt, item_name, ga_raw_source)
@@ -433,33 +417,7 @@ def extract_one_patient(ID, group):
                     rec['ga_delivery_correction_source'] = f'{trig_item}@{trig_dt.date()}'
             else:
                 rec.setdefault('ga_delivery_corrected', False)
-
-    current_ga = rec.get('ga_delivery')
-    if pd.notna(current_ga) and pd.notna(min_ga_raw_detected):
-        added = 0
-        if current_ga <= 38.86 and min_ga_raw_detected < 4:
-            added = 3
-        elif current_ga <= 39.86 and min_ga_raw_detected < 3:
-            added = 2
-        elif current_ga <= 40.86 and min_ga_raw_detected < 2:
-            added = 1
-
-        if added > 0:
-            rec['ga_delivery_before_rule'] = current_ga
-            rec['ga_delivery'] = round(current_ga + added, 2)
-            rec['ga_delivery_rule_adjustment'] = True
-            rec['ga_delivery_adjustment_amount'] = added
-        else:
-            rec['ga_delivery_rule_adjustment'] = False
-            rec['ga_delivery_adjustment_amount'] = 0
-    else:
-        rec['ga_delivery_rule_adjustment'] = False
-        rec['ga_delivery_adjustment_amount'] = 0
-
-    # 记录原始值及检测到的最小孕周（便于追溯）
-    rec['ga_delivery_original'] = original_ga_delivery
-    rec['min_ga_raw_detected'] = min_ga_raw_detected
-
+                
     # ------------------------------------------------------------------
     # 4.2 孕前 BMI（从体征文本中正则提取）
     # ------------------------------------------------------------------
