@@ -52,12 +52,6 @@ analyze_data.py  ——  GDM-OGTT 表型与母儿结局分析主程序
     thyroid_trajectory       甲状腺动态轨迹（8 类）：all_normal / persistent_hypo / ...
     thyroid_trajectory_midlate  中+晚期轨迹（次级）
 
-  动态甲状腺指标（build_trimester_thyroid 派生，仅用于描述）：
-    tsh_delta_per_wk         TSH 变化速率（mIU/L/周）
-    ever_hypo                任意时间 TSH > 2.5（0/1）
-    tsh_controlled           用药者末次 TSH ≤ 2.5（0/1）
-    tsh_cv                   TSH 个体内变异系数
-
   优甲乐折算（compute_dose_per_kg 派生）：
     优甲乐_dose_per_kg       体重折算剂量（μg/kg）
     优甲乐_dose_kg_cat       折算剂量分组：未使用 / 低剂量(<1.0) / 中剂量(1.0-1.8) / 足量(>1.8)
@@ -259,25 +253,33 @@ _OUTCOME_MEDIATOR_EXCLUDE = {
 # ── A. 甲状腺孕期阈值常量 ────────────────────────────────────
 # 来源：院内实验室参考范围（ATA 2017 孕期分层口径）
 # 孕期划分：early=GA<14w  mid=14≤GA<28w  late=GA≥28w
-#
-# 临床甲减（overt）：TSH 超过上限 且 FT4 低于下限
-# 亚临床甲减（subclinical）：TSH 在 2.5 到上限之间 且 FT4 在正常范围内
-# 合并判定（本研究不区分临床/亚临床）：TSH > 2.5 即视为"甲功减退"
-# 甲功正常（达标）：TSH ≤ 2.5 且 FT4 ≥ 孕期下限
+"""
+      - overt_hypo       : TSH > 上限 且 FT4 < 下限
+      - subclinical_hypo : TSH > 上限 且 FT4 在 [下限, 上限] 内
+      - isolated_hypothyroxinemia: TSH 在 [下限, 上限] 内 且 FT4 < 下限
+      - euthyroid        : TSH 在 [下限, 上限] 内 且 FT4 在 [下限, 上限] 内
+      - other            : 其他情况（如 TSH 低于下限但 FT4 正常等）
+"""
 
-# 试剂公司：Roche（电化学免疫分析法）
-# 来源：《妊娠和产后甲状腺疾病诊治指南》（第2版），中华内分泌代谢杂志 2019
-# TSH 单位 mIU/L，FT4 单位 pmol/L
 THYROID_THRESHOLDS = {
-    # 孕早期（< 14w）
-    'early': {'tsh_lower': 0.09, 'tsh_overt': 4.52, 'tsh_sub': 2.5,
-              'ft4_lower': 13.15, 'ft4_upper': 20.78},
-    # 孕中期（14–28w）
-    'mid':   {'tsh_lower': 0.45, 'tsh_overt': 4.32, 'tsh_sub': 2.5,
-              'ft4_lower': 9.77,  'ft4_upper': 18.89},
-    # 孕晚期（≥ 28w）
-    'late':  {'tsh_lower': 0.30, 'tsh_overt': 4.98, 'tsh_sub': 2.5,
-              'ft4_lower': 9.04,  'ft4_upper': 15.22},
+    'early': {
+        'tsh_lower': 0.09,
+        'tsh_upper': 4.52,
+        'ft4_lower': 13.15,
+        'ft4_upper': 20.78,
+    },
+    'mid': {
+        'tsh_lower': 0.45,
+        'tsh_upper': 4.32,
+        'ft4_lower': 9.77,
+        'ft4_upper': 18.89,
+    },
+    'late': {
+        'tsh_lower': 0.30,
+        'tsh_upper': 4.98,
+        'ft4_lower': 9.04,
+        'ft4_upper': 15.22,
+    },
 }
 
 TSH_NORMAL_UPPER = 2.5   # 三孕期统一：TSH ≤ 2.5 才算达标
@@ -301,18 +303,14 @@ def classify_trimester(ga):
         return 'late'
 
 
-def classify_thyroid_status(tsh, ft4, trimester):
+def classify_thyroid_status(tsh, ft4, trimester, tpoab_binary=None):
     """
-    联合判定单次检测的甲状腺状态。
-    返回值：'hypo' / 'euthyroid' / 'hyper' / 'ft4_only' / None（数据缺失）
+    联合判定单次检测的甲状腺状态，与 excel提取.py 完全对齐。
 
-    判定逻辑（本研究合并临床+亚临床甲减，统称 hypo）：
-      TSH > 2.5                      → hypo（不细分临床/亚临床）
-      TSH < 0.1                      → hyper（甲亢，本研究暂不深入分析）
-      0.1 ≤ TSH ≤ 2.5 且 FT4 正常   → euthyroid
-      TSH 缺失但 FT4 有值            → ft4_only（仅供参考，不参与主判定）
+    返回值：'overt_hypo' / 'subclinical_hypo' / 'isolated_hypothyroxinemia' /
+           'euthyroid' / 'hyper' / 'other' / None（数据缺失）
     """
-    import numpy as np
+
     if trimester is None:
         return None
 
@@ -326,170 +324,28 @@ def classify_thyroid_status(tsh, ft4, trimester):
 
     tsh = float(tsh)
     thr = THYROID_THRESHOLDS.get(trimester, THYROID_THRESHOLDS['mid'])
-    tsh_lower = thr.get('tsh_lower', 0.1)   # Roche 各孕期下限
+    tsh_low, tsh_high = thr['tsh_lower'], thr['tsh_upper']
+    ft4_low, ft4_high = thr['ft4_lower'], thr['ft4_upper']
 
-    if tsh > TSH_NORMAL_UPPER:   # > 2.5 mIU/L → 甲减（合并临床+亚临床）
-        return 'hypo'
-    elif tsh < tsh_lower:         # 低于孕期下限 → 甲亢
-        return 'hyper'
-    else:
-        # TSH 在正常范围，但需排除继发性甲减（TSH"正常"+FT4低下）
-        if not ft4_missing:
-            ft4_lower = thr.get('ft4_lower')
-            if ft4_lower and float(ft4) < ft4_lower:
-                return 'isolated_hypothyroxinemia'   # 孤立性低甲状腺素血症（TSH正常+FT4低下）
+    # 显性甲减：TSH > 上限 且 FT4 < 下限
+    if tsh > tsh_high and ft4 < ft4_low:
+        return 'overt_hypo'
+    # 亚临床甲减：TSH > 上限 且 FT4 在正常范围内
+    elif tsh > tsh_high and ft4_low <= ft4 <= ft4_high:
+        return 'subclinical_hypo'
+    # 孤立性低甲状腺素血症：TSH 正常 且 FT4 < 下限
+    elif tsh_low <= tsh <= tsh_high and ft4 < ft4_low:
+        # 若 TPOAb 阳性则归为 'other'
+        if tpoab_binary is not None and tpoab_binary == 1:
+            return 'other'
+        else:
+            return 'isolated_hypothyroxinemia'
+    # 甲状腺功能正常
+    elif tsh_low <= tsh <= tsh_high and ft4_low <= ft4 <= ft4_high:
         return 'euthyroid'
-
-
-# ── B. TSH/FT4 宽表 → 每孕期代表值（TSH 最高那次）────────────
-def build_trimester_thyroid(df):
-    """
-    将 tsh_1…tsh_12 / ft4_1…ft4_14 宽表转换为每患者每孕期的代表值。
-
-    代表值选取规则：
-      同一孕期有多次检测时，取 TSH 最高的那次（反映最高风险暴露）。
-      若孕期内只有 ft4-only 检测（无 TSH），则 TSH 代表值标记为 NaN，
-      FT4 取最后一次（用于参考，不参与主判定）。
-
-    新增列（按孕期）：
-      thyroid_tsh_{tri}    : 代表值 TSH（早/中/晚期）
-      thyroid_ft4_{tri}    : 配套 FT4
-      thyroid_ga_{tri}     : 代表值对应孕周
-      thyroid_status_{tri} : 甲状腺状态判定（hypo/euthyroid/hyper/ft4_only/None）
-
-    tri ∈ {early, mid, late}
-    """
-
-    result_cols = {
-        tri: {
-            'tsh': f'thyroid_tsh_{tri}',
-            'ft4': f'thyroid_ft4_{tri}',
-            'ga':  f'thyroid_ga_{tri}',
-            'status': f'thyroid_dyn_status_{tri}',
-        }
-        for tri in ['early', 'mid', 'late']
-    }
-
-    # 初始化输出列
-    for tri, cols in result_cols.items():
-        for col in cols.values():
-            df[col] = np.nan if 'status' not in col else None
-
-    for idx, row in df.iterrows():
-        # 收集所有有效检测点：(ga, tsh, ft4, visit_n)
-        visits = []
-
-        # 配对检测（第 1–12 次，TSH 和 FT4 同次）
-        for n in range(1, FT4_TSH_PAIRED_MAX + 1):
-            tsh_col  = f'tsh_{n}'
-            ft4_col  = f'ft4_{n}'
-            ga_col   = f'tsh_ga_{n}'
-            if tsh_col not in df.columns:
-                continue
-            ga  = row.get(ga_col)
-            tsh = row.get(tsh_col)
-            ft4 = row.get(ft4_col)
-            if pd.isna(ga) and pd.isna(tsh):
-                continue
-            visits.append({'n': n, 'ga': ga, 'tsh': tsh, 'ft4': ft4,
-                            'paired': True})
-
-        # FT4-only 检测（第 13–14 次，无配对 TSH）
-        for n in range(FT4_TSH_PAIRED_MAX + 1, FT4_MAX_N + 1):
-            ft4_col = f'ft4_{n}'
-            ga_col  = f'ft4_ga_{n}'
-            if ft4_col not in df.columns:
-                continue
-            ga  = row.get(ga_col)
-            ft4 = row.get(ft4_col)
-            if pd.isna(ga) and pd.isna(ft4):
-                continue
-            visits.append({'n': n, 'ga': ga, 'tsh': np.nan, 'ft4': ft4,
-                            'paired': False})
-
-        # 按孕期分组，找代表值
-        for tri in ['early', 'mid', 'late']:
-            # 该孕期内所有配对检测点（有 TSH 值）
-            paired_in_tri = [
-                v for v in visits
-                if v['paired'] and classify_trimester(v['ga']) == tri
-                and not pd.isna(v['tsh'])
-            ]
-            ft4_only_in_tri = [
-                v for v in visits
-                if not v['paired'] and classify_trimester(v['ga']) == tri
-                and not pd.isna(v['ft4'])
-            ]
-
-            cols = result_cols[tri]
-
-            if paired_in_tri:
-                # 取 TSH 最高的那次
-                best = max(paired_in_tri, key=lambda v: float(v['tsh']))
-                df.at[idx, cols['tsh']]    = best['tsh']
-                df.at[idx, cols['ft4']]    = best['ft4']
-                df.at[idx, cols['ga']]     = best['ga']
-                df.at[idx, cols['status']] = classify_thyroid_status(
-                    best['tsh'], best['ft4'], tri)
-            elif ft4_only_in_tri:
-                # 仅 FT4，取最后一次（ga 最大）
-                best = max(ft4_only_in_tri,
-                           key=lambda v: float(v['ga']) if not pd.isna(v['ga']) else -1)
-                df.at[idx, cols['ft4']]    = best['ft4']
-                df.at[idx, cols['ga']]     = best['ga']
-                df.at[idx, cols['status']] = 'ft4_only'
-            # 否则该孕期无数据，保持 NaN / None
-
-    # ── 动态衍生指标 ──────────────────────────────────────────
-    # 仅用于描述统计，不进主模型协变量
-    df['tsh_delta_per_wk'] = np.nan
-    df['ever_hypo']        = 0
-    df['tsh_controlled']   = np.nan
-    df['tsh_cv']           = np.nan
-
-    for idx, row in df.iterrows():
-        tsh_vals = []
-        tsh_gas  = []
-        for n in range(1, TSH_MAX_N + 1):
-            t = row.get(f'tsh_{n}')
-            g = row.get(f'tsh_ga_{n}')
-            if pd.notna(t) and pd.notna(g):
-                tsh_vals.append(float(t))
-                tsh_gas.append(float(g))
-        if len(tsh_vals) >= 2:
-            # TSH 变化速率 (mIU/L / 周)
-            first, last = tsh_vals[0], tsh_vals[-1]
-            ga_first, ga_last = tsh_gas[0], tsh_gas[-1]
-            if ga_last - ga_first > 0.5:
-                df.at[idx, 'tsh_delta_per_wk'] = (last - first) / (ga_last - ga_first)
-            # 个体内变异系数
-            mu = np.mean(tsh_vals)
-            sd = np.std(tsh_vals, ddof=1)
-            df.at[idx, 'tsh_cv'] = sd / mu if mu > 0 else np.nan
-        # 任何一次 TSH > 2.5
-        if any(v > TSH_NORMAL_UPPER for v in tsh_vals):
-            df.at[idx, 'ever_hypo'] = 1
-    # 用药者末次有效 TSH ≤ 2.5 才算达标
-    if '优甲乐_used' in df.columns:
-        med_mask = df['优甲乐_used'] == 1
-        for idx in df[med_mask].index:
-            last_tsh = np.nan
-            for n in range(TSH_MAX_N, 0, -1):
-                v = df.at[idx, f'tsh_{n}']
-                if pd.notna(v):
-                    last_tsh = v
-                    break
-            if pd.notna(last_tsh):
-                df.at[idx, 'tsh_controlled'] = 1 if float(last_tsh) <= TSH_NORMAL_UPPER else 0
-
-    _n_delta = int(df['tsh_delta_per_wk'].notna().sum())
-    _n_ever  = int(df['ever_hypo'].sum())
-    _n_ctrl  = int(df['tsh_controlled'].notna().sum())
-    _n_cv    = int(df['tsh_cv'].notna().sum())
-    _info(f"  动态指标: tsh_delta有效={_n_delta}  ever_hypo={_n_ever}"
-          f"  controlled有效={_n_ctrl}  tsh_cv有效={_n_cv}")
-
-    return df
+    # 其他情况（如 TSH 低于下限但 FT4 正常等）
+    else:
+        return 'other'
 
 
 # ── C0. 甲功检测（限OGTT前）合并状态：专供共病/单病分组使用 ──────
@@ -537,6 +393,11 @@ def build_thyroid_status_preogtt(df):
             if pd.isna(ga_ogtt):
                 continue
 
+            # 获取该患者的 tpoab_binary（若列存在）
+            tpoab_val = row.get('tpoab_binary', np.nan)
+            if pd.isna(tpoab_val):
+                tpoab_val = None   # 转换为 None 以便 classify_thyroid_status 识别
+
             statuses = []
             for n in range(1, TSH_MAX_N + 1):
                 tsh_col, ga_col, ft4_col = f'tsh_{n}', f'tsh_ga_{n}', f'ft4_{n}'
@@ -551,7 +412,7 @@ def build_thyroid_status_preogtt(df):
                     continue  # 检测不早于 OGTT，放弃该次记录
 
                 tri = classify_trimester(ga)
-                status = classify_thyroid_status(tsh, ft4, tri)
+                status = classify_thyroid_status(tsh, ft4, tri, tpoab_binary=tpoab_val)
                 if status is not None and status != 'ft4_only':
                     statuses.append(status)
 
@@ -606,7 +467,6 @@ def build_thyroid_status_preogtt(df):
         f"eh正常+无检测记录(n=0)={int((~early_hyper_bad & (df['n_thyroid_preogtt']==0) & has_ogtt_data).sum()):,} "
         f"有OGTT检测+甲状腺状态缺失+eh正常={int(mask.sum()):,}")   
     
-     
     return df
 
 
@@ -839,12 +699,12 @@ def build_comorbidity_group(df):
 
 
 # ── F. 甲状腺轨迹分类 ────────────────────────────────────────
-# 在 build_trimester_thyroid 跑完后调用
+# 在 thyroid_dyn_status_early / mid / late 跑完后调用
 def build_thyroid_trajectory(df):
     """
     基于三孕期动态状态构造轨迹分类标签。
 
-    输入列（由 build_trimester_thyroid 生成）：
+    输入列：
       thyroid_dyn_status_early / mid / late
 
     轨迹编码：
@@ -869,18 +729,19 @@ def build_thyroid_trajectory(df):
     主分析用三期完整轨迹（早/中/晚，覆盖率~73%）；
     中+晚期轨迹作为次级分析（覆盖率~31%，仅用于与 RCS 分层对齐）。
     """
-    import pandas as pd
 
     def _status_to_code(status):
         if status is None or (isinstance(status, float) and status != status):
             return 'N'
         s = str(status)
-        if s == 'euthyroid':  return 'T'
-        if s == 'hypo':       return 'H'
-        if s == 'isolated_hypothyroxinemia': return 'H'  # 孤立性低T4血症归入甲减
-        if s == 'hyper':      return 'Hr'  # Hr = hyperthyroidism，与 H(hypo) 区分
-        if s == 'ft4_only':   return 'O'   # O = other，保留信号
-        if s == 'other':      return 'O'   # 其他甲状腺疾病
+        if s == 'euthyroid':  
+            return 'T'
+        if s in ('hypo', 'overt_hypo', 'subclinical_hypo', 'isolated_hypothyroxinemia'):
+            return 'H'      # 合并为甲减
+        if s == 'hyper':
+            return 'Hr'     # 甲亢
+        if s in ('ft4_only', 'other'):
+            return 'O'      # 其他异常
         return 'N'
 
     e = df['thyroid_dyn_status_early'].apply(_status_to_code)
@@ -5142,10 +5003,28 @@ def analyze_from_saved_data(input_file='dataset/preprocessed_data.xlsx',
                 analysis_data.at[_idx, 'bmi'] = _np_bmi.nan
             _warn(f'BMI < 15 修正: {int(_ok.sum())} 条已修正，{int((~_ok).sum())} 条设NaN')
 
+    # ── B. 甲状腺孕期状态：直接使用提取脚本生成的 thyroid_status_{tri} 列 ──
+    # 说明：excel1.5.py 采用“最差状态优先”策略合并同一孕期的多次检测，
+    #       而非“取 TSH 最高”策略，保证了与 _build_composite_thyroid 口径一致。
+    #       此处直接将 thyroid_status_{tri} 复制为 thyroid_dyn_status_{tri}，
+    #       供后续轨迹分类 (build_thyroid_trajectory) 使用。
     _info("\n[甲状腺动态处理]")
-    analysis_data = build_trimester_thyroid(analysis_data)
+    for tri in ['early', 'mid', 'late']:
+        src_col = f'thyroid_status_{tri}'
+        dst_col = f'thyroid_dyn_status_{tri}'
+        if src_col in analysis_data.columns:
+            analysis_data[dst_col] = analysis_data[src_col]
+        else:
+            # 兼容旧列名（如有 _strict 后缀）
+            alt_col = f'thyroid_status_{tri}_strict'
+            if alt_col in analysis_data.columns:
+                analysis_data[dst_col] = analysis_data[alt_col]
+            else:
+                _warn(f"  未找到 {src_col} 或 {alt_col}，{dst_col} 将全为 NaN")
+                analysis_data[dst_col] = np.nan
+    _info("  ✓ 直接使用提取脚本的 thyroid_status_{tri} 作为孕期代表状态（已复制到 thyroid_dyn_status_{tri}）")
 
-    # F. 轨迹分类（需在 build_trimester_thyroid 之后）
+    # F. 轨迹分类（基于已复制的 thyroid_dyn_status_{tri}）
     analysis_data = build_thyroid_trajectory(analysis_data)
 
     # ── 甲状腺合并列派生 ────────────────────────────────
