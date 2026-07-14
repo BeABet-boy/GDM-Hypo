@@ -58,7 +58,7 @@ THYROID_THRESHOLDS = {
 }
 
 # 甲状腺状态合并优先级（有甲减优先）
-THYROID_PRIORITY = {'overt_hypo': 3, 'subclinical_hypo': 2, 'other': 1, 'euthyroid': 0}
+THYROID_PRIORITY = {'overt_hypo': 4, 'subclinical_hypo': 3, 'isolated_hypothyroxinemia': 2, 'other': 1, 'euthyroid': 0}
 
 
 # LGA/SGA 参考体重（g）
