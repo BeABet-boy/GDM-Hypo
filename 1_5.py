@@ -303,7 +303,7 @@ def classify_trimester(ga):
         return 'late'
 
 
-def classify_thyroid_status(tsh, ft4, trimester, tpoab_binary=None):
+def classify_thyroid_status(tsh, ft4, trimester):
     """
     联合判定单次检测的甲状腺状态，与 excel提取.py 完全对齐。
 
@@ -335,11 +335,7 @@ def classify_thyroid_status(tsh, ft4, trimester, tpoab_binary=None):
         return 'subclinical_hypo'
     # 孤立性低甲状腺素血症：TSH 正常 且 FT4 < 下限
     elif tsh_low <= tsh <= tsh_high and ft4 < ft4_low:
-        # 若 TPOAb 阳性则归为 'other'
-        if tpoab_binary is not None and tpoab_binary == 1:
-            return 'other'
-        else:
-            return 'isolated_hypothyroxinemia'
+        return 'isolated_hypothyroxinemia'
     # 甲状腺功能正常
     elif tsh_low <= tsh <= tsh_high and ft4_low <= ft4 <= ft4_high:
         return 'euthyroid'
@@ -393,11 +389,6 @@ def build_thyroid_status_preogtt(df):
             if pd.isna(ga_ogtt):
                 continue
 
-            # 获取该患者的 tpoab_binary（若列存在）
-            tpoab_val = row.get('tpoab_binary', np.nan)
-            if pd.isna(tpoab_val):
-                tpoab_val = None   # 转换为 None 以便 classify_thyroid_status 识别
-
             statuses = []
             for n in range(1, TSH_MAX_N + 1):
                 tsh_col, ga_col, ft4_col = f'tsh_{n}', f'tsh_ga_{n}', f'ft4_{n}'
@@ -412,7 +403,7 @@ def build_thyroid_status_preogtt(df):
                     continue  # 检测不早于 OGTT，放弃该次记录
 
                 tri = classify_trimester(ga)
-                status = classify_thyroid_status(tsh, ft4, tri, tpoab_binary=tpoab_val)
+                status = classify_thyroid_status(tsh, ft4, tri)
                 if status is not None and status != 'ft4_only':
                     statuses.append(status)
 
