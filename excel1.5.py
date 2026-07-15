@@ -225,7 +225,7 @@ def get_trimester(ga_weeks):
         return 'late'
 
 
-def classify_thyroid(tsh, ft4, trimester, tpoab_binary=None):
+def classify_thyroid(tsh, ft4, trimester):
     """
     按孕期阈值对单次 TSH+FT4 配对进行甲状腺功能分类。
     返回 (status)。
@@ -248,10 +248,7 @@ def classify_thyroid(tsh, ft4, trimester, tpoab_binary=None):
         status = 'subclinical_hypo'
     # 孤立性低甲状腺素血症
     elif tsh_low <= tsh <= tsh_high and ft4 < ft4_low:
-        if tpoab_binary == 0:
-            status = 'isolated_hypothyroxinemia'
-        else:
-            status = 'other'
+        status = 'isolated_hypothyroxinemia'
     # 甲状腺功能正常
     elif tsh_low <= tsh <= tsh_high and ft4_low <= ft4 <= ft4_high:
         status = 'euthyroid'
@@ -781,7 +778,6 @@ def extract_one_patient(ID, group):
     # ------------------------------------------------------------------
     # 4.10 甲状腺功能分期判断（仅使用同组内 TSH 和 FT4 均存在的记录）
     # ------------------------------------------------------------------
-    tpoab_binary = rec.get('tpoab_binary')
     tri_strict = {'early': [], 'mid': [], 'late': []}
 
     for rec_pair in combined_records:
@@ -796,7 +792,7 @@ def extract_one_patient(ID, group):
         trimester = get_trimester(ga_use)
         if trimester is None:
             continue
-        s_strict = classify_thyroid(tsh_val, ft4_val, trimester, tpoab_binary)
+        s_strict = classify_thyroid(tsh_val, ft4_val, trimester)
         tri_strict[trimester].append(s_strict)
 
     for tri in ('early', 'mid', 'late'):
