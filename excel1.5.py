@@ -1,11 +1,12 @@
 import re
 import warnings
+from collections import defaultdict
 import pandas as pd
 import numpy as np
 import math
 
-warnings.filterwarnings('ignore')
-
+# warnings.filterwarnings('ignore', category=FutureWarning)
+# warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 # OGTT 诊断阈值
 T0 = 5.1   # 空腹血糖 mmol/L
@@ -122,7 +123,9 @@ def parse_age(val):
     cleaned = ''.join(c for c in str(val) if c.isdigit() or c == '.')
     return pd.to_numeric(cleaned, errors='coerce')
 
-
+# ===========================================================================
+# 利用"分娩孕周" - ("出生日期" - "检测时间") 反推 "检测孕周"
+# ===========================================================================
 def compute_ga_preferred(birth_date, dt, ga_delivery, ga_source=None):
     """
     优先用公式反推检测孕周，反推失败或无效时使用源数据孕周。
@@ -140,46 +143,9 @@ def compute_ga_preferred(birth_date, dt, ga_delivery, ga_source=None):
         ga = round(float(ga_source), 2)
     return ga
 
-def group_ogtt_visits(records0, records1, records2):
-    """
-    将 ogtt0/1/2 的记录按检测日期分组。
-    每个记录格式: (数值, 日期datetime, 孕周)
-    返回 list，每个元素为 dict，包含 'ogtt0', 'ogtt1', 'ogtt2' 及其日期、孕周。
-    """
-    from collections import defaultdict
-    groups = defaultdict(lambda: {
-        'ogtt0': (np.nan, None, np.nan),
-        'ogtt1': (np.nan, None, np.nan),
-        'ogtt2': (np.nan, None, np.nan)
-    })
-    # 填充记录
-    for val, dt, ga in records0:
-        if dt is not None:
-            date_key = dt.date()
-            groups[date_key]['ogtt0'] = (val, dt, ga)
-    for val, dt, ga in records1:
-        if dt is not None:
-            date_key = dt.date()
-            groups[date_key]['ogtt1'] = (val, dt, ga)
-    for val, dt, ga in records2:
-        if dt is not None:
-            date_key = dt.date()
-            groups[date_key]['ogtt2'] = (val, dt, ga)
-    # 按日期排序
-    visits = []
-    for date in sorted(groups.keys()):
-        g = groups[date]
-        visits.append({
-            'ogtt0': g['ogtt0'][0], 'ogtt0_date': g['ogtt0'][1], 'ogtt0_ga': g['ogtt0'][2],
-            'ogtt1': g['ogtt1'][0], 'ogtt1_date': g['ogtt1'][1], 'ogtt1_ga': g['ogtt1'][2],
-            'ogtt2': g['ogtt2'][0], 'ogtt2_date': g['ogtt2'][1], 'ogtt2_ga': g['ogtt2'][2],
-        })
-    return visits
-
 # ===========================================================================
 # 2. LGA/SGA 评估
 # ===========================================================================
-
 def evaluate_lga_sga(sex_code, birth_weight, ga_delivery):
     """
     根据性别（1=男, 0=女）、出生体重（g）、分娩孕周（周）评估 LGA/SGA/AGA。
@@ -209,7 +175,6 @@ def evaluate_lga_sga(sex_code, birth_weight, ga_delivery):
 # ===========================================================================
 # 3. 甲状腺功能分类
 # ===========================================================================
-
 def get_trimester(ga_weeks):
     """
     根据孕周返回孕期字符串：'early' / 'mid' / 'late'。
@@ -268,51 +233,9 @@ def collapse_trimester_statuses(statuses):
     return max(valid, key=lambda s: THYROID_PRIORITY.get(s, -1))
 
 
-def find_closest_ft4(ft4_records, target_dt, window_days=FT4_PAIR_WINDOW_DAYS):
-    """
-    在 ft4_records = [(datetime_or_None, value), ...] 中，
-    找到距 target_dt 最近且时间差 ≤ window_days 天的 FT4 值。
-    返回 (value, date) 或 (None, None)。
-    """
-    if not ft4_records or target_dt is None:
-        return None, None
-    best_val, best_dt, best_diff = None, None, float('inf')
-    for dt, val in ft4_records:
-        if dt is None:
-            continue
-        diff = abs((dt - target_dt).days)
-        if diff <= window_days and diff < best_diff:
-            best_diff, best_val, best_dt = diff, val, dt
-    return best_val, best_dt
-
-
-def find_closest_before(records, target_dt, max_days_after=14):
-    """
-    从 (datetime_or_None, value) 列表中选取距 target_dt 最近的值。
-    优先取 target_dt 之前（含当天）最晚的一条；
-    若无，则取 target_dt 之后 max_days_after 天内最早的一条。
-    返回 (value, datetime) 或 (None, None)。
-    """
-    if not records:
-        return None, None
-    dated = sorted([(d, v) for d, v in records if d is not None], key=lambda x: x[0])
-    if not dated:
-        return None, None
-    before = [(d, v) for d, v in dated if d <= target_dt]
-    if before:
-        best = max(before, key=lambda x: x[0])
-        return best[1], best[0]
-    after = [(d, v) for d, v in dated if target_dt < d <= target_dt + pd.Timedelta(days=max_days_after)]
-    if after:
-        best = min(after, key=lambda x: x[0])
-        return best[1], best[0]
-    return None, None
-
-
 # ===========================================================================
 # 4. 核心提取函数：处理单个患者的 group
 # ===========================================================================
-
 def extract_one_patient(ID, group):
     """
     从患者的所有行（长格式 group）中提取全部指标。
@@ -356,7 +279,6 @@ def extract_one_patient(ID, group):
         rec['nicu'] = 1 if s in ('是', '有', '1', 'Y', 'y', 'Yes', 'yes') else (0 if s in ('否', '无', '0', 'N', 'n', 'No', 'no') else np.nan)
     else:
         rec['nicu'] = np.nan
-
 
     # 分娩方式（剖宫产=1，顺产/阴道助产=0）
     mode_val = first_nonull(group['分娩方式']) if '分娩方式' in group else None
@@ -454,9 +376,6 @@ def extract_one_patient(ID, group):
             if not pd.isna(height) and not pd.isna(weight) and not pd.isna(prepregnancy_bmi_value):
                 break
 
-    # # 记录原始提取的体重（用于后续判断）
-    # raw_weight = weight
-
     # 若同时有身高和体重，计算BMI
     if not pd.isna(height) and not pd.isna(weight):
         calculate_bmi = weight / ((height / 100) ** 2)
@@ -543,6 +462,7 @@ def extract_one_patient(ID, group):
     rec['premature_rupture_of_membranes'] = 1 if has_prom   else 0
     rec['external_fertilization']         = 1 if has_ivf    else 0
     rec['chorioamnionitis']               = 1 if has_chorio else 0
+
 
     # ===========================================================================
     # 4.4 OGTT 按检测日期分组提取
@@ -636,13 +556,17 @@ def extract_one_patient(ID, group):
         rec['ogtt1'] = last_complete['ogtt1']
         rec['ogtt2'] = last_complete['ogtt2']
     else:
-        # 无完整组：取各自最早记录（按检测时间最早）
-        earliest0 = ogtt0_records[0] if ogtt0_records else (np.nan, None, np.nan)
-        earliest1 = ogtt1_records[0] if ogtt1_records else (np.nan, None, np.nan)
-        earliest2 = ogtt2_records[0] if ogtt2_records else (np.nan, None, np.nan)
-        rec['ogtt0'] = earliest0[0]
-        rec['ogtt1'] = earliest1[0]
-        rec['ogtt2'] = earliest2[0]
+        # 无同一日期完成的 OGTT → 不做跨日期拼凑，标记缺失
+        rec['ogtt0'] = rec['ogtt1'] = rec['ogtt2'] = np.nan
+
+        # # 无完整组：取各自最早记录（按检测时间最早）
+        # earliest0 = ogtt0_records[0] if ogtt0_records else (np.nan, None, np.nan)
+        # earliest1 = ogtt1_records[0] if ogtt1_records else (np.nan, None, np.nan)
+        # earliest2 = ogtt2_records[0] if ogtt2_records else (np.nan, None, np.nan)
+        # rec['ogtt0'] = earliest0[0]
+        # rec['ogtt1'] = earliest1[0]
+        # rec['ogtt2'] = earliest2[0]
+
 
     # ===========================================================================
     # 4.5 计算 ga_ogtt（优先完整组孕周，否则最早记录孕周）
@@ -673,6 +597,7 @@ def extract_one_patient(ID, group):
             earliest = min(all_ogtt_records, key=lambda x: x[0])
             ga_ogtt = earliest[1]
     rec['ga_ogtt'] = ga_ogtt
+
 
     # ------------------------------------------------------------------
     # 4.6 TPO 抗体（只保留第一次检测时间最早的那条记录）
@@ -743,7 +668,6 @@ def extract_one_patient(ID, group):
     # ------------------------------------------------------------------
     # 4.9 按检测日期分组 TSH 和 FT4（允许同组中某项缺失）
     # ------------------------------------------------------------------
-    from collections import defaultdict
     groups_tf = defaultdict(lambda: {'tsh': (np.nan, None, np.nan),
                                      'ft4': (np.nan, None, np.nan)})
 
@@ -833,14 +757,12 @@ def extract_one_patient(ID, group):
         early_hyperglycemia = 0
     rec['early_hyperglycemia'] = early_hyperglycemia
 
-
     return rec
 
 
 # ===========================================================================
 # 5. 读取与合并原始数据
 # ===========================================================================
-
 def load_source_excel(file_path):
     """
     读取单个原始 Excel 文件（长格式）。
@@ -898,7 +820,6 @@ def extract_all_patients(df, year_label):
 # ===========================================================================
 # 6. 药物数据合并
 # ===========================================================================
-
 def merge_drug_data(patient_df, drug_file_path):
     """
     从 提取版.xlsx 合并药物使用信息（优甲乐、门冬胰岛素、甘精胰岛素）。
@@ -939,6 +860,9 @@ def merge_drug_data(patient_df, drug_file_path):
         used = used & ~((numeric_vals == 0) & numeric_vals.notna())
         # 排除空字符串或仅空白字符
         used = used & (orig_vals.astype(str).str.strip() != '')
+        # # 排除中文/英文"未使用"类文本             (待定)
+        # _not_used = orig_vals.astype(str).str.strip().str.lower()
+        # used = used & ~_not_used.isin(['未使用', '无', '否', 'na', 'n/a', 'null', 'none'])
         merged[f'{col}_used'] = used.astype(float)
 
     matched = merged[drug_cols[0]].notna().sum()
@@ -949,7 +873,6 @@ def merge_drug_data(patient_df, drug_file_path):
 # ===========================================================================
 # 7. 表型分类与衍生指标
 # ===========================================================================
-
 def compute_phenotype(df):
     """
     计算 GDM 表型分类（phenotype3）、OGTT AUC 及标准化严重度 Z 分。
@@ -1007,7 +930,6 @@ def compute_phenotype(df):
 # ===========================================================================
 # 8. 整理列顺序（与表头.txt 对齐）
 # ===========================================================================
-
 # 固定列顺序（动态 tsh_N 列另行处理）
 FIXED_COL_ORDER = [
     'ID', 'ogtt0', 'ogtt1', 'ogtt2', 'FBG', 'early_hyperglycemia',
@@ -1103,7 +1025,6 @@ def reorder_columns(df):
 # ===========================================================================
 # 9. 主入口
 # ===========================================================================
-
 def run_pipeline(source_files, drug_file, output_path='dataset/preprocessed_data.xlsx'):
     """
     端到端数据提取与预处理流水线。
@@ -1119,9 +1040,9 @@ def run_pipeline(source_files, drug_file, output_path='dataset/preprocessed_data
     ----
     pd.DataFrame：最终宽表
     """
-    print("=" * 60)
+    print("=" * 30)
     print("  GDM 数据提取流水线")
-    print("=" * 60)
+    print("=" * 30)
 
     all_chunks = []
 
@@ -1159,9 +1080,9 @@ def run_pipeline(source_files, drug_file, output_path='dataset/preprocessed_data
     df = reorder_columns(df)
 
     # ---- 终端统计摘要 ----
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 30)
     print("  提取结果摘要")
-    print("=" * 60)
+    print("=" * 30)
     print(f"  总患者数          : {len(df):,}")
     print(f"  有 OGTT 数据      : {df['ogtt0'].notna().sum():,}")
     tsh_cols = [c for c in df.columns if re.fullmatch(r'tsh_\d+', c)]
@@ -1211,14 +1132,13 @@ def run_pipeline(source_files, drug_file, output_path='dataset/preprocessed_data
     print(f"\n[保存] 写入 {output_path} …")
     df.to_excel(output_path, index=False)
     print(f"  ✓ 完成！共 {len(df):,} 行 × {len(df.columns)} 列")
-    print("=" * 60)
+    print("=" * 30)
     return df
 
 
 # ===========================================================================
 # 10. 脚本入口
 # ===========================================================================
-
 if __name__ == '__main__':
 
     SOURCE_FILES = [
