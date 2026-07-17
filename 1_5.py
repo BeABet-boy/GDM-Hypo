@@ -377,41 +377,121 @@ def build_thyroid_status_preogtt(df):
              'hyper': 'other', 'other': 'other', 'euthyroid': 'euthyroid'}
 
     df['thyroid_status_preogtt'] = np.nan
-    df['n_thyroid_preogtt'] = 0   # 调试用：纳入判定的 OGTT 前检测次数
+    df['thyroid_status_preogtt'] = df['thyroid_status_preogtt'].astype(object)
+    df['n_thyroid_preogtt'] = 0
 
     if 'ga_ogtt' not in df.columns:
         _warn("  ⚠ 未找到 ga_ogtt 列，thyroid_status_preogtt 全部为 NaN")
-    else:
-        ga_ogtt_num = pd.to_numeric(df['ga_ogtt'], errors='coerce')
+        return df
 
-        for idx, row in df.iterrows():
-            ga_ogtt = ga_ogtt_num.at[idx]
-            if pd.isna(ga_ogtt):
-                continue
+    ga_ogtt_num = pd.to_numeric(df['ga_ogtt'], errors='coerce')
 
-            statuses = []
-            for n in range(1, TSH_MAX_N + 1):
-                tsh_col, ga_col, ft4_col = f'tsh_{n}', f'tsh_ga_{n}', f'ft4_{n}'
-                if tsh_col not in df.columns or ga_col not in df.columns:
-                    continue
-                tsh = row.get(tsh_col)
-                ga  = row.get(ga_col)
-                ft4 = row.get(ft4_col) if ft4_col in df.columns else np.nan
-                if pd.isna(tsh) or pd.isna(ga):
-                    continue
-                if float(ga) >= float(ga_ogtt):
-                    continue  # 检测不早于 OGTT，放弃该次记录
+    # ── 向量化：将宽表展开为长表，批量分类，再取每患者最差值 ──────
+    n = len(df)
+    patient_idx = np.repeat(np.arange(n), TSH_MAX_N)
+    measure_num = np.tile(np.arange(1, TSH_MAX_N + 1), n)
 
-                tri = classify_trimester(ga)
-                status = classify_thyroid_status(tsh, ft4, tri)
-                if status is not None and status != 'ft4_only':
-                    statuses.append(status)
+    # 提取所有患者的 tsh / ga / ft4 矩阵
+    tsh_matrix = np.full((n, TSH_MAX_N), np.nan)
+    ga_matrix  = np.full((n, TSH_MAX_N), np.nan)
+    ft4_matrix = np.full((n, TSH_MAX_N), np.nan)
 
-            df.at[idx, 'n_thyroid_preogtt'] = len(statuses)
-            valid = [s for s in statuses if s in PRIORITY]
-            if valid:
-                worst = max(valid, key=lambda s: PRIORITY[s])
-                df.at[idx, 'thyroid_status_preogtt'] = REMAP.get(worst, worst)
+    for k in range(1, TSH_MAX_N + 1):
+        tsh_col = f'tsh_{k}'
+        ga_col  = f'tsh_ga_{k}'
+        ft4_col = f'ft4_{k}'
+        if tsh_col in df.columns:
+            tsh_matrix[:, k - 1] = pd.to_numeric(df[tsh_col], errors='coerce').values
+        if ga_col in df.columns:
+            ga_matrix[:, k - 1] = pd.to_numeric(df[ga_col], errors='coerce').values
+        if ft4_col in df.columns:
+            ft4_matrix[:, k - 1] = pd.to_numeric(df[ft4_col], errors='coerce').values
+
+    # 展开为长表
+    tsh_flat = tsh_matrix.ravel()
+    ga_flat  = ga_matrix.ravel()
+    ft4_flat = ft4_matrix.ravel()
+    ga_ogtt_flat = ga_ogtt_num.values[patient_idx]
+
+    # 过滤：TSH 和 GA 非缺失，且检测孕周 < OGTT 孕周
+    valid = (~np.isnan(tsh_flat) & ~np.isnan(ga_flat)
+             & ~np.isnan(ga_ogtt_flat) & (ga_flat < ga_ogtt_flat))
+
+    if not valid.any():
+        _info("\n[甲功检测（限OGTT前）合并状态 thyroid_status_preogtt]")
+        _info(f"    无任何满足条件的 OGTT 前检测记录，全部为 NaN")
+        return df
+
+    # 分类孕期
+    tri = np.where(ga_flat < 14, 'early', np.where(ga_flat < 28, 'mid', 'late'))
+
+    # 分类甲状腺状态（向量化阈值判定）
+    tsh_v = tsh_flat[valid]
+    ft4_v = ft4_flat[valid]
+    tri_v = tri[valid]
+
+    ft4_missing = np.isnan(ft4_v)
+    tsh_hypo  = tsh_v > TSH_NORMAL_UPPER                           # > 2.5
+    tsh_hyper = np.zeros(len(tsh_v), dtype=bool)
+    euthyroid_like = ~tsh_hypo
+    for t in ['early', 'mid', 'late']:
+        mask_t = (tri_v == t) & euthyroid_like
+        if mask_t.any():
+            tsh_lower = THYROID_THRESHOLDS.get(t, THYROID_THRESHOLDS['mid']).get('tsh_lower', 0.1)
+            tsh_hyper[mask_t] = tsh_v[mask_t] < tsh_lower
+
+    status = np.full(len(tsh_v), 'euthyroid', dtype=object)
+    status[tsh_hypo]  = 'hypo'
+    status[tsh_hyper] = 'hyper'
+
+    # TSH 正常范围内，检查孤立性低甲状腺素血症（TSH正常+FT4低下）
+    check_iso = euthyroid_like & ~tsh_hyper & ~ft4_missing
+    if check_iso.any():
+        for t in ['early', 'mid', 'late']:
+            mask_t = check_iso & (tri_v == t)
+            if mask_t.any():
+                ft4_lower = THYROID_THRESHOLDS.get(t, THYROID_THRESHOLDS['mid']).get('ft4_lower')
+                if ft4_lower:
+                    iso = mask_t & (ft4_v < ft4_lower)
+                    status[iso] = 'isolated_hypothyroxinemia'
+
+    # TSH 缺失 → ft4_only（不参与主判定）
+    tsh缺失 = np.isnan(tsh_flat[valid])
+    status[tsh缺失] = 'ft4_only'
+
+    # 写回结果
+    valid_indices = np.where(valid)[0]
+    pat_idx_valid = patient_idx[valid_indices]
+    status_valid  = status
+
+    # REMAP: overt_hypo/subclinical_hypo/isolated_hypothyroxinemia → hypo, hyper → other
+    remap_arr = np.array([REMAP.get(s, s) for s in status_valid], dtype=object)
+    # ft4_only 保持不变（后续会被过滤）
+
+    # 对每个患者，取优先级最高的状态（priority 值越大越差）
+    priority_arr = np.array([PRIORITY.get(s, -1) for s in remap_arr])
+
+    # 只纳入有 PRIORITY 的状态（排除 ft4_only 等）
+    has_priority = priority_arr >= 0
+
+    # 用 pandas groupby 取最差值
+    tmp = pd.DataFrame({
+        'patient': pat_idx_valid[has_priority],
+        'status': remap_arr[has_priority],
+        'priority': priority_arr[has_priority],
+    })
+    if not tmp.empty:
+        idx_worst = tmp.groupby('patient')['priority'].idxmax()
+        worst_per_patient = tmp.loc[idx_worst].set_index('patient')
+
+        # 写入结果
+        for pid, row in worst_per_patient.iterrows():
+            df.at[df.index[pid], 'thyroid_status_preogtt'] = row['status']
+
+        # 写入 n_thyroid_preogtt（有效检测次数）
+        n_valid_per_patient = tmp.groupby('patient').size()
+        for pid, cnt in n_valid_per_patient.items():
+            df.at[df.index[pid], 'n_thyroid_preogtt'] = cnt
 
     # ── 放弃甲功检测结果的两类样本 ──────────────────────────────
     if all(c in df.columns for c in ['ogtt0', 'ogtt1', 'ogtt2']):
@@ -443,9 +523,12 @@ def build_thyroid_status_preogtt(df):
     _info(f"    放弃甲功结果: 无OGTT={int(no_ogtt.sum()):,}  "
           f"孕早期高血糖为空/为1={int(early_hyper_bad.sum()):,}  "
           f"(因此被置NaN且原本有甲功前结果的={n_dropped:,})")
-    
+
     # 额外输出：有OGTT且早期高血糖异常/缺失的人数
-    _has_ogtt = df[['ogtt0','ogtt1','ogtt2']].notna().any(axis=1) & df['ga_ogtt'].notna()
+    if all(c in df.columns for c in ['ogtt0','ogtt1','ogtt2']):
+        _has_ogtt = df[['ogtt0','ogtt1','ogtt2']].notna().any(axis=1) & df['ga_ogtt'].notna()
+    else:
+        _has_ogtt = pd.Series(False, index=df.index)
     _early_hyper_bad_ogtt = early_hyper_bad & _has_ogtt
     _info(f"有OGTT且早期高血糖缺失或阳性: {int(_early_hyper_bad_ogtt.sum()):,}"
         f"( = 总早期高血糖异常 {int(early_hyper_bad.sum()):,} "
@@ -456,8 +539,8 @@ def build_thyroid_status_preogtt(df):
     _info(f"    [细分] eh异常+无检测记录(n=0)={int((early_hyper_bad & (df['n_thyroid_preogtt']==0)).sum()):,}  "
         f"eh异常+有检测记录但被作废={n_dropped:,}  "
         f"eh正常+无检测记录(n=0)={int((~early_hyper_bad & (df['n_thyroid_preogtt']==0) & has_ogtt_data).sum()):,} "
-        f"有OGTT检测+甲状腺状态缺失+eh正常={int(mask.sum()):,}")   
-    
+        f"有OGTT检测+甲状腺状态缺失+eh正常={int(mask.sum()):,}")
+
     return df
 
 
@@ -871,7 +954,7 @@ CLINICAL_RR_MAX          = 1.2   # 效应量临床意义门槛（RR 上限，>1.
                                  # 才标注为"有临床意义"——过滤大样本下的统计显著但效应量微不足道的假阳性
 AGE_THRESHOLD            = 35    # 年龄分层阈值
                                  # ≥ AGE_THRESHOLD → 高龄产妇（AMA，Advanced Maternal Age）
-                                 # < AGE_THRESHOLD → 非高龄（用于交互/分层对比）
+                                  # < AGE_THRESHOLD → 非高龄（用于交互/分层对比）
 HIGH_PREVALENCE_OUTCOMES = ['delivery_mode']    # 高发生率结局列表：这些结局发生率 > 20%，建议额外使用 log-binomial 回归
 
 # ── FDR 分族校正：按分析类型分三族独立 BH 校正 ────────────────
@@ -992,7 +1075,7 @@ def check_overdispersion(model):
     try:
         pearson_chi2 = model.pearson_chi2
         df_resid     = model.df_resid
-        if df_resid <= 0:
+        if df_resid <= 0 or np.isnan(pearson_chi2):
             return np.nan, False
         ratio = pearson_chi2 / df_resid
         return ratio, ratio > OVERDISPERSION_THRESHOLD
@@ -2757,6 +2840,7 @@ def perform_drug_interaction_analysis(analysis_data, outcome_var='nicu',
             
             # 初始化分类列
             dose_df['优甲乐_dose_cat'] = np.nan
+            dose_df['优甲乐_dose_cat'] = dose_df['优甲乐_dose_cat'].astype(object)
             dose_df.loc[mask_unused, '优甲乐_dose_cat'] = '未使用(0)'
             dose_df.loc[valid_dose_mask & (dose_vals <= 50), '优甲乐_dose_cat'] = '低剂量(1-50μg)'
             dose_df.loc[valid_dose_mask & (dose_vals > 50) & (dose_vals <= 100), '优甲乐_dose_cat'] = '中剂量(51-100μg)'
@@ -4096,6 +4180,9 @@ def compute_reri(model_r1, outcome_var):
     cov_sub = cov.loc[keys, keys].values
     betas   = params[keys].values
     rr_vals = np.exp(betas)
+    if not np.all(np.isfinite(rr_vals)):
+        _warn(f"RERI [{outcome_var}] 跳过：RR 含 Inf/NaN (betas={betas})")
+        return None
     grad    = np.array([rr_vals[0], -rr_vals[1], -rr_vals[2]])
     var_reri = grad @ cov_sub @ grad
     if var_reri <= 0:
@@ -5051,11 +5138,13 @@ def analyze_from_saved_data(input_file='dataset/preprocessed_data.xlsx',
 
     # 有 OGTT 数据（三个时间点至少一个非空）
     has_ogtt = analysis_data[['ogtt0','ogtt1','ogtt2']].notna().any(axis=1)
-    _info(f"有 OGTT 数据: {has_ogtt.sum():,} ({has_ogtt.sum()/total*100:.1f}%)")
+    _info(f"有 OGTT 数据: {has_ogtt.sum():,} ({has_ogtt.sum()/total*100:.1f}%)" if total > 0
+          else f"有 OGTT 数据: {has_ogtt.sum():,}")
 
     # 有 OGTT 前甲功检测结果（thyroid_status_preogtt 非 NaN）
     has_thy_pre = analysis_data['thyroid_status_preogtt'].notna()
-    _info(f"有 OGTT 前甲功检测结果: {has_thy_pre.sum():,} ({has_thy_pre.sum()/total*100:.1f}%)")
+    _info(f"有 OGTT 前甲功检测结果: {has_thy_pre.sum():,} ({has_thy_pre.sum()/total*100:.1f}%)" if total > 0
+          else f"有 OGTT 前甲功检测结果: {has_thy_pre.sum():,}")
 
     # 正常对照（无 GDM + 甲功正常）
     normal = (analysis_data['is_normal'] == 1)
@@ -5088,8 +5177,9 @@ def analyze_from_saved_data(input_file='dataset/preprocessed_data.xlsx',
     if 'bmi' in analysis_data.columns:
         bmi_missing = analysis_data['bmi'].isna().sum()
         bmi_total   = len(analysis_data)
-        _info(f' bmi: 有效 {bmi_total-bmi_missing}/{bmi_total} ' f'({(bmi_total-bmi_missing)/bmi_total*100:.1f}%)')
-        if bmi_missing / bmi_total > 0.30:
+        _info(f' bmi: 有效 {bmi_total-bmi_missing}/{bmi_total} ' f'({(bmi_total-bmi_missing)/bmi_total*100:.1f}%)' if bmi_total > 0
+              else f' bmi: 有效 {bmi_total-bmi_missing}/{bmi_total}')
+        if bmi_total > 0 and bmi_missing / bmi_total > 0.30:
             _warn(' ⚠ BMI 缺失率 >30%，完整模型样本量将明显减少，' '建议在 Discussion 中说明完全病例分析的局限性')
     else:
         _warn('  bmi 列不存在，将不纳入协变量')
@@ -5105,14 +5195,16 @@ def analyze_from_saved_data(input_file='dataset/preprocessed_data.xlsx',
         analysis_data['preterm'] = (ga < 37).astype(float).where(ga.notna())
         n_pt  = int(analysis_data['preterm'].sum())
         n_val = int(ga.notna().sum())
-        _info(f'  早产（< 37 周，自动建立）: {n_pt}/{n_val} 例 ({n_pt/n_val*100:.1f}%)')
+        _info(f'  早产（< 37 周，自动建立）: {n_pt}/{n_val} 例 ({n_pt/n_val*100:.1f}%)' if n_val > 0
+              else f'  早产（< 37 周，自动建立）: {n_pt}/{n_val} 例')
 
     # 巨大儿：出生体重 ≥ 4000g
     if 'macrosomia' not in analysis_data.columns and 'birth_weight' in analysis_data.columns:
         bw = pd.to_numeric(analysis_data['birth_weight'], errors='coerce')
         analysis_data['macrosomia'] = (bw >= 4000).astype(float).where(bw.notna())
         n_mac = int(analysis_data['macrosomia'].sum())
-        _info(f'  巨大儿（自动建立）: {n_mac} 例 ({n_mac/len(analysis_data)*100:.1f}%)')
+        _info(f'  巨大儿（自动建立）: {n_mac} 例 ({n_mac/len(analysis_data)*100:.1f}%)' if len(analysis_data) > 0
+              else f'  巨大儿（自动建立）: {n_mac} 例')
 
     # ── 年份列标准化 ─────────────────────────────────────────
     if 'year' not in analysis_data.columns:
@@ -5371,7 +5463,7 @@ def analyze_from_saved_data(input_file='dataset/preprocessed_data.xlsx',
 
     _info("\n[SHAP 分析]")
     try:
-        run_shap_analysis(analysis_data)
+        run_shap_analysis(analysis_data, output_dir=_paper_out)
     except Exception as _e_shap:
         _warn(f"  SHAP 分析失败（不影响主结果）: {_e_shap}")
 
@@ -6044,8 +6136,8 @@ def generate_table1(analysis_data, group_col='phenotype3',
                     if pd.notna(p1) and pd.notna(p2):
                         pool = np.sqrt((p1*(1-p1) + p2*(1-p2)) / 2)
                         smds.append(abs((p1-p2)/pool) if pool > 1e-9 else 0.0)
-            row['最大|SMD|'] = f"{max(smds):.3f}" if smds else ''
-            rows.append(row)
+        row['最大|SMD|'] = f"{max(x for x in smds if not np.isnan(x)):.3f}" if smds and any(not np.isnan(x) for x in smds) else ''
+        rows.append(row)
 
     table1_df = pd.DataFrame(rows)
     _info(table1_df.to_string(index=False))
@@ -6798,6 +6890,7 @@ def _collect_paper_figures(all_rcs_results, base_output_dir):
         if not os.path.isfile(src):
             _dbg(f"  [skip] {fname} not found at {src}")
             continue
+        os.makedirs(os.path.dirname(os.path.join(paper_dir, fname)), exist_ok=True)
         dst = os.path.join(paper_dir, f'Fig{fig_num}_{os.path.basename(fname)}')
         shutil.copy2(src, dst)
         copied.append(f'Fig{fig_num}: {desc}')
@@ -6856,8 +6949,6 @@ def plot_spline_curve(df, continuous_var, outcome_var,
     var_label      : 图中 x 轴标签（如 'OGTT 空腹血糖（mmol/L）'）
     output_dir     : 图片保存目录（默认脚本所在目录/dataset/输出图）
     """
-    import patsy
-
     # ── 数据准备 ─────────────────────────────────────────────
     required = [continuous_var, outcome_var] + (covariates or [])
     data = df.dropna(subset=required).copy()
@@ -6877,21 +6968,31 @@ def plot_spline_curve(df, continuous_var, outcome_var,
     if knots == 4 and (n_events < 50 or len(data) < 200):
         knots = 3
 
-    cov_str = (" + " + " + ".join(covariates)) if covariates else ""
-
-    # ── 拟合样条 Poisson 模型（用 patsy dmatrix）─────────────
+    # ── 拟合样条 Poisson 模型（用 _rcs_basis，与 test_linearity_rcs 一致）──
     try:
-        f_spline = f"cr({continuous_var}, df={knots}){cov_str}"
-        X_spline = patsy.dmatrix(f_spline, data, return_type='dataframe')
+        knot_positions = _select_rcs_knots(
+            pd.to_numeric(data[continuous_var], errors='coerce'),
+            knots, is_stratified=False)
+        cov_data = data[[c for c in (covariates or [])
+                         if c in data.columns and c != continuous_var]].copy()
+        for col in cov_data.select_dtypes(include=['object', 'category']).columns:
+            cov_data = pd.get_dummies(cov_data, columns=[col], drop_first=True)
+
+        X_spline_part = _rcs_basis(
+            pd.to_numeric(data[continuous_var], errors='coerce'),
+            knot_positions)
+        X_spline = pd.concat([X_spline_part, cov_data.reset_index(drop=True)], axis=1)
+        X_spline = sm.add_constant(X_spline)
+
         y = data[outcome_var].values
         m_spline = sm.GLM(
-            y, X_spline,
+            y, X_spline.astype(float),
             family=sm.families.Poisson(link=sm.families.links.log())
         ).fit(cov_type='HC3')
         if not getattr(m_spline, 'converged', True):
             _dbg(f"  样条图模型未收敛，maxiter 重试: {continuous_var}→{outcome_var}")
             m_spline = sm.GLM(
-                y, X_spline,
+                y, X_spline.astype(float),
                 family=sm.families.Poisson(link=sm.families.links.log())
             ).fit(cov_type='HC3', start_params=m_spline.params, maxiter=200)
     except Exception as e:
@@ -6903,8 +7004,6 @@ def plot_spline_curve(df, continuous_var, outcome_var,
     x_grid = np.linspace(x_min, x_max, 200)
     x_median = float(data[continuous_var].median())
 
-    pred_data = data.iloc[:1].copy()
-    # 扩展为 200 行预测网格
     pred_rows = []
     for xv in x_grid:
         row = {continuous_var: xv}
@@ -6913,11 +7012,17 @@ def plot_spline_curve(df, continuous_var, outcome_var,
         pred_rows.append(row)
     pred_df = pd.DataFrame(pred_rows)
 
-    # 用同样的 dmatrix 公式生成预测矩阵
+    # 用 _rcs_basis 生成预测矩阵
     try:
-        X_pred = patsy.dmatrix(f_spline, pred_df,
-                               return_type='dataframe')
-        # 确保列顺序与训练时一致
+        cov_pred = pred_df[[c for c in (covariates or [])
+                            if c in pred_df.columns and c != continuous_var]].copy()
+        for col in cov_pred.select_dtypes(include=['object', 'category']).columns:
+            cov_pred = pd.get_dummies(cov_pred, columns=[col], drop_first=True)
+        X_pred_part = _rcs_basis(
+            pd.to_numeric(pred_df[continuous_var], errors='coerce'),
+            knot_positions)
+        X_pred = pd.concat([X_pred_part, cov_pred.reset_index(drop=True)], axis=1)
+        X_pred = sm.add_constant(X_pred)
         X_pred = X_pred.reindex(columns=X_spline.columns, fill_value=0)
     except Exception as e:
         _warn(f"  预测矩阵构建失败: {e}")
@@ -6931,8 +7036,16 @@ def plot_spline_curve(df, continuous_var, outcome_var,
         # 参考点：中位数处的预测值
         ref_row = pd.DataFrame([{continuous_var: x_median,
                                   **{c: float(data[c].mean()) for c in (covariates or [])}}])
-        X_ref   = patsy.dmatrix(f_spline, ref_row, return_type='dataframe')
-        X_ref   = X_ref.reindex(columns=X_spline.columns, fill_value=0)
+        cov_ref = ref_row[[c for c in (covariates or [])
+                           if c in ref_row.columns and c != continuous_var]].copy()
+        for col in cov_ref.select_dtypes(include=['object', 'category']).columns:
+            cov_ref = pd.get_dummies(cov_ref, columns=[col], drop_first=True)
+        X_ref_part = _rcs_basis(
+            pd.to_numeric(ref_row[continuous_var], errors='coerce'),
+            knot_positions)
+        X_ref = pd.concat([X_ref_part, cov_ref.reset_index(drop=True)], axis=1)
+        X_ref = sm.add_constant(X_ref)
+        X_ref = X_ref.reindex(columns=X_spline.columns, fill_value=0)
         ref_log = float(m_spline.predict(X_ref, linear=True).iloc[0])
 
         # 相对于中位数的对数 RR（加法尺度）
@@ -8227,7 +8340,7 @@ def run_shap_analysis(analysis_data, output_dir=None):
         top_features = pd.Series(mean_abs_shap, index=X.columns).sort_values(ascending=False).head(5).index
         for feat in top_features:
             if feat not in ['ogtt0', 'ogtt1', 'ogtt2', 'FBG',
-                            'age', 'bmi', 'ga_ogtt' 'tpo_ab',
+                            'age', 'bmi', 'ga_ogtt', 'tpo_ab',
                             'tsh_delta_per_wk', 'tsh_cv']:
                 continue
             try:
