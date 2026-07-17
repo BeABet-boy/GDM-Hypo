@@ -153,19 +153,19 @@ from scipy import stats
 from scipy.stats import chi2
 from statsmodels.stats.multitest import multipletests
 
-warnings.filterwarnings('ignore', category=FutureWarning)
-warnings.filterwarnings('ignore', message='.*iteration limit.*')
-warnings.filterwarnings('ignore', category=UserWarning,
-    message='Title is more than 31 characters')
-# 屏蔽已知无害噪音（PerformanceWarning 和 regex pattern 警告）
-try:
-    warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning)
-except (NameError, AttributeError):
-    pass
-warnings.filterwarnings('ignore', message='.*pattern.*interpreted.*regular expression.*')
-# 屏蔽 statsmodels GLM 边界收敛警告（模型结果仍可用，真发散会抛异常）
-warnings.filterwarnings('ignore', category=UserWarning,
-    message='Maximum Likelihood optimization failed to converge')
+# warnings.filterwarnings('ignore', category=FutureWarning)
+# warnings.filterwarnings('ignore', message='.*iteration limit.*')
+# warnings.filterwarnings('ignore', category=UserWarning,
+#     message='Title is more than 31 characters')
+# # 屏蔽已知无害噪音（PerformanceWarning 和 regex pattern 警告）
+# try:
+#     warnings.filterwarnings('ignore', category=pd.errors.PerformanceWarning)
+# except (NameError, AttributeError):
+#     pass
+# warnings.filterwarnings('ignore', message='.*pattern.*interpreted.*regular expression.*')
+# # 屏蔽 statsmodels GLM 边界收敛警告（模型结果仍可用，真发散会抛异常）
+# warnings.filterwarnings('ignore', category=UserWarning,
+#     message='Maximum Likelihood optimization failed to converge')
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 输出基础设施
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -5463,7 +5463,7 @@ def analyze_from_saved_data(input_file='dataset/preprocessed_data.xlsx',
 
     _info("\n[SHAP 分析]")
     try:
-        run_shap_analysis(analysis_data, output_dir=_paper_out)
+        run_shap_analysis(analysis_data)
     except Exception as _e_shap:
         _warn(f"  SHAP 分析失败（不影响主结果）: {_e_shap}")
 
@@ -6890,7 +6890,7 @@ def _collect_paper_figures(all_rcs_results, base_output_dir):
         if not os.path.isfile(src):
             _dbg(f"  [skip] {fname} not found at {src}")
             continue
-        os.makedirs(os.path.dirname(os.path.join(paper_dir, fname)), exist_ok=True)
+        # os.makedirs(os.path.dirname(os.path.join(paper_dir, fname)), exist_ok=True)
         dst = os.path.join(paper_dir, f'Fig{fig_num}_{os.path.basename(fname)}')
         shutil.copy2(src, dst)
         copied.append(f'Fig{fig_num}: {desc}')
