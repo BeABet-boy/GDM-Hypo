@@ -389,7 +389,6 @@ def build_thyroid_status_preogtt(df):
     # ── 向量化：将宽表展开为长表，批量分类，再取每患者最差值 ──────
     n = len(df)
     patient_idx = np.repeat(np.arange(n), TSH_MAX_N)
-    measure_num = np.tile(np.arange(1, TSH_MAX_N + 1), n)
 
     # 提取所有患者的 tsh / ga / ft4 矩阵
     tsh_matrix = np.full((n, TSH_MAX_N), np.nan)
@@ -430,44 +429,66 @@ def build_thyroid_status_preogtt(df):
     ft4_v = ft4_flat[valid]
     tri_v = tri[valid]
 
+    # ── 按孕期获取阈值（向量化） ──────────────────────────────
+    # 初始化阈值数组
+    tsh_low = np.full_like(tsh_v, np.nan, dtype=float)
+    tsh_high = np.full_like(tsh_v, np.nan, dtype=float)
+    ft4_low = np.full_like(tsh_v, np.nan, dtype=float)
+    ft4_high = np.full_like(tsh_v, np.nan, dtype=float)
+
+    # 早孕期
+    mask_early = (tri_v == 'early')
+    tsh_low[mask_early] = THYROID_THRESHOLDS['early']['tsh_lower']
+    tsh_high[mask_early] = THYROID_THRESHOLDS['early']['tsh_upper']
+    ft4_low[mask_early] = THYROID_THRESHOLDS['early']['ft4_lower']
+    ft4_high[mask_early] = THYROID_THRESHOLDS['early']['ft4_upper']
+
+    # 中孕期
+    mask_mid = (tri_v == 'mid')
+    tsh_low[mask_mid] = THYROID_THRESHOLDS['mid']['tsh_lower']
+    tsh_high[mask_mid] = THYROID_THRESHOLDS['mid']['tsh_upper']
+    ft4_low[mask_mid] = THYROID_THRESHOLDS['mid']['ft4_lower']
+    ft4_high[mask_mid] = THYROID_THRESHOLDS['mid']['ft4_upper']
+
+    # 晚孕期
+    mask_late = (tri_v == 'late')
+    tsh_low[mask_late] = THYROID_THRESHOLDS['late']['tsh_lower']
+    tsh_high[mask_late] = THYROID_THRESHOLDS['late']['tsh_upper']
+    ft4_low[mask_late] = THYROID_THRESHOLDS['late']['ft4_lower']
+    ft4_high[mask_late] = THYROID_THRESHOLDS['late']['ft4_upper']
+
+    # ── 分类（完全复现 1.txt 的 classify_thyroid_status） ──────
     ft4_missing = np.isnan(ft4_v)
-    tsh_hypo  = tsh_v > TSH_NORMAL_UPPER                           # > 2.5
-    tsh_hyper = np.zeros(len(tsh_v), dtype=bool)
-    euthyroid_like = ~tsh_hypo
-    for t in ['early', 'mid', 'late']:
-        mask_t = (tri_v == t) & euthyroid_like
-        if mask_t.any():
-            tsh_lower = THYROID_THRESHOLDS.get(t, THYROID_THRESHOLDS['mid']).get('tsh_lower', 0.1)
-            tsh_hyper[mask_t] = tsh_v[mask_t] < tsh_lower
 
-    status = np.full(len(tsh_v), 'euthyroid', dtype=object)
-    status[tsh_hypo]  = 'hypo'
-    status[tsh_hyper] = 'hyper'
+    # 默认状态为 'other'
+    status = np.full(len(tsh_v), 'other', dtype=object)
 
-    # TSH 正常范围内，检查孤立性低甲状腺素血症（TSH正常+FT4低下）
-    check_iso = euthyroid_like & ~tsh_hyper & ~ft4_missing
-    if check_iso.any():
-        for t in ['early', 'mid', 'late']:
-            mask_t = check_iso & (tri_v == t)
-            if mask_t.any():
-                ft4_lower = THYROID_THRESHOLDS.get(t, THYROID_THRESHOLDS['mid']).get('ft4_lower')
-                if ft4_lower:
-                    iso = mask_t & (ft4_v < ft4_lower)
-                    status[iso] = 'isolated_hypothyroxinemia'
+    # 1. 显性甲减：TSH > 上限 且 FT4 < 下限（FT4 非缺失）
+    mask = (~ft4_missing) & (tsh_v > tsh_high) & (ft4_v < ft4_low)
+    status[mask] = 'overt_hypo'
 
-    # TSH 缺失 → ft4_only（不参与主判定）
-    tsh缺失 = np.isnan(tsh_flat[valid])
-    status[tsh缺失] = 'ft4_only'
+    # 2. 亚临床甲减：TSH > 上限 且 FT4 在正常范围内
+    mask = (~ft4_missing) & (tsh_v > tsh_high) & (ft4_v >= ft4_low) & (ft4_v <= ft4_high)
+    status[mask] = 'subclinical_hypo'
+
+    # 3. 孤立性低甲状腺素血症：TSH 正常 且 FT4 < 下限
+    mask = (~ft4_missing) & (tsh_v >= tsh_low) & (tsh_v <= tsh_high) & (ft4_v < ft4_low)
+    status[mask] = 'isolated_hypothyroxinemia'
+
+    # 4. 甲状腺功能正常：TSH 正常 且 FT4 正常
+    mask = (~ft4_missing) & (tsh_v >= tsh_low) & (tsh_v <= tsh_high) & (ft4_v >= ft4_low) & (ft4_v <= ft4_high)
+    status[mask] = 'euthyroid'
+
+    # ── 映射到简化类别 ─────────────────────────────────────────
+    # 将 overt_hypo/subclinical_hypo/isolated_hypothyroxinemia → hypo
+    # hyper（实际上不会出现）→ other，但保留映射逻辑
+    remap_arr = np.array([REMAP.get(s, s) for s in status], dtype=object)
 
     # 写回结果
     valid_indices = np.where(valid)[0]
     pat_idx_valid = patient_idx[valid_indices]
-    status_valid  = status
 
-    # REMAP: overt_hypo/subclinical_hypo/isolated_hypothyroxinemia → hypo, hyper → other
-    remap_arr = np.array([REMAP.get(s, s) for s in status_valid], dtype=object)
     # ft4_only 保持不变（后续会被过滤）
-
     # 对每个患者，取优先级最高的状态（priority 值越大越差）
     priority_arr = np.array([PRIORITY.get(s, -1) for s in remap_arr])
 
