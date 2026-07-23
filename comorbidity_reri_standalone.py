@@ -177,21 +177,23 @@ def classify_thyroid_status(tsh, ft4, trimester):
     tsh = float(tsh)
     thr = THYROID_THRESHOLDS.get(trimester, THYROID_THRESHOLDS['mid'])
     tsh_lower = thr.get('tsh_lower', 0.1)
-    tsh_overt = thr.get('tsh_overt', 4.5)
+    tsh_upper = thr.get('tsh_upper', 4.5)
+    ft4_lower = thr.get('ft4_lower')
+    ft4_upper = thr.get('ft4_upper')
 
-    if tsh > tsh_overt:
-        if not ft4_missing:
-            ft4_lower = thr.get('ft4_lower')
-            if ft4_lower and float(ft4) < ft4_lower:
-                return 'overt_hypo'
+    if tsh > tsh_upper:
+        if not ft4_missing and ft4_lower and float(ft4) < ft4_lower:
+            return 'overt_hypo'
+        if not ft4_missing and ft4_upper and float(ft4) > ft4_upper:
+            return 'other'
         return 'subclinical_hypo'
     elif tsh < tsh_lower:
         return 'hyper'
     else:
-        if not ft4_missing:
-            ft4_lower = thr.get('ft4_lower')
-            if ft4_lower and float(ft4) < ft4_lower:
-                return 'isolated_hypothyroxinemia'
+        if not ft4_missing and ft4_lower and float(ft4) < ft4_lower:
+            return 'isolated_hypothyroxinemia'
+        if not ft4_missing and ft4_upper and float(ft4) > ft4_upper:
+            return 'other'
         return 'euthyroid'
 
 
@@ -257,12 +259,19 @@ def build_trimester_thyroid(df):
             cols = result_cols[tri]
 
             if paired_in_tri:
-                best = max(paired_in_tri, key=lambda v: float(v['tsh']))
+                _tri_priority = {'overt_hypo': 4, 'subclinical_hypo': 3,
+                                 'isolated_hypothyroxinemia': 2, 'other': 1,
+                                 'euthyroid': 0, 'hyper': 0}
+                scored = []
+                for v in paired_in_tri:
+                    st = classify_thyroid_status(v['tsh'], v['ft4'], tri)
+                    scored.append((_tri_priority.get(st, -1), v['ga'], st, v))
+                scored.sort(key=lambda x: (x[0], -(x[1] if x[1] is not None and not pd.isna(x[1]) else -999)), reverse=True)
+                best = scored[0][3]
                 df.at[idx, cols['tsh']]    = best['tsh']
                 df.at[idx, cols['ft4']]    = best['ft4']
                 df.at[idx, cols['ga']]     = best['ga']
-                df.at[idx, cols['status']] = classify_thyroid_status(
-                    best['tsh'], best['ft4'], tri)
+                df.at[idx, cols['status']] = scored[0][2]
             elif ft4_only_in_tri:
                 best = max(ft4_only_in_tri,
                            key=lambda v: float(v['ga']) if not pd.isna(v['ga']) else -1)
@@ -422,6 +431,9 @@ def build_thyroid_status_preogtt(df):
     mask = (~ft4_missing) & (tsh_v >= tsh_low) & (tsh_v <= tsh_high) & (ft4_v >= ft4_low) & (ft4_v <= ft4_high)
     status[mask] = 'euthyroid'
 
+    # ── 保留原始严重程度分类（供亚组分析使用）──────────────
+    severity_arr = status.copy()
+
     # ── 映射到简化类别 ─────────────────────────────────────────
     remap_arr = np.array([REMAP.get(s, s) for s in status], dtype=object)
 
@@ -433,9 +445,14 @@ def build_thyroid_status_preogtt(df):
 
     has_priority = priority_arr >= 0
 
+    # 严重程度子集（保留原始分类用于亚组分析）
+    df['thyroid_severity_preogtt'] = np.nan
+    df['thyroid_severity_preogtt'] = df['thyroid_severity_preogtt'].astype(object)
+
     tmp = pd.DataFrame({
         'patient': pat_idx_valid[has_priority],
         'status': remap_arr[has_priority],
+        'severity': severity_arr[has_priority],
         'priority': priority_arr[has_priority],
     })
     if not tmp.empty:
@@ -444,6 +461,7 @@ def build_thyroid_status_preogtt(df):
 
         for pid, row in worst_per_patient.iterrows():
             df.at[df.index[pid], 'thyroid_status_preogtt'] = row['status']
+            df.at[df.index[pid], 'thyroid_severity_preogtt'] = row['severity']
 
         n_valid_per_patient = tmp.groupby('patient').size()
         for pid, cnt in n_valid_per_patient.items():
@@ -467,6 +485,7 @@ def build_thyroid_status_preogtt(df):
     drop_mask = no_ogtt | early_hyper_bad
     n_dropped = int((drop_mask & df['thyroid_status_preogtt'].notna()).sum())
     df.loc[drop_mask, 'thyroid_status_preogtt'] = np.nan
+    df.loc[drop_mask, 'thyroid_severity_preogtt'] = np.nan
 
     n_hy = int((df['thyroid_status_preogtt'] == 'hypo').sum())
     n_eu = int((df['thyroid_status_preogtt'] == 'euthyroid').sum())
@@ -717,7 +736,7 @@ def build_thyroid_trajectory(df):
 # ── 甲状腺合并列派生 ────────────────────────────────────────
 def _build_composite_thyroid(df):
     PRIORITY = {'overt_hypo': 3, 'subclinical_hypo': 2,
-                'isolated_hypothyroxinemia': 1.5, 'other': 1, 'euthyroid': 0}
+                'isolated_hypothyroxinemia': 2, 'other': 1, 'euthyroid': 0}
     REMAP    = {'overt_hypo': 'hypo', 'subclinical_hypo': 'hypo',
                 'isolated_hypothyroxinemia': 'hypo',
                 'euthyroid': 'euthyroid', 'other': 'other'}
@@ -1065,12 +1084,36 @@ def fit_robust_poisson(df, formula, outcome_var,
             ).fit(cov_type=cov_type if use_robust else 'nonrobust', maxiter=200)
             if getattr(model_lb, 'converged', True):
                 if np.all(np.isfinite(model_lb.params)):
-                    diagnostics['model_type'] = 'logbinomial'
-                    diagnostics['cov_type'] = cov_type if use_robust else 'standard'
-                    diagnostics['aic'] = model_lb.aic
-                    diagnostics['bic'] = model_lb.bic
-                    _dbg("Log-binomial 收敛成功，替代 Poisson")
-                    return model_lb, model_lb, complete, diagnostics
+                    # ── 方向性校验：粗RR与LB调整后RR方向是否一致 ──
+                    _lb_ok = True
+                    _grp_col = next((c for c in ['comorbidity_group', 'g']
+                                     if c in complete.columns), None)
+                    if _grp_col is not None:
+                        _groups = complete[_grp_col].unique()
+                        if len(_groups) == 2:
+                            _y = complete[outcome_var].values
+                            _g = complete[_grp_col].values
+                            _d0 = int(_y[_g == _groups[0]].sum())
+                            _n0 = int((_g == _groups[0]).sum())
+                            _d1 = int(_y[_g == _groups[1]].sum())
+                            _n1 = int((_g == _groups[1]).sum())
+                            if _n0 > 0 and _n1 > 0 and _d0 > 0:
+                                _crude_rr = (_d1 / _n1) / (_d0 / _n0)
+                                _lb_rr = float(np.exp(model_lb.params.iloc[1]))
+                                if (_crude_rr > 1 and _lb_rr < 1) or \
+                                   (_crude_rr < 1 and _lb_rr > 1):
+                                    _dbg(f"LB方向校验失败: 粗RR={_crude_rr:.3f}, "
+                                         f"LB RR={_lb_rr:.3f}, 降级Poisson")
+                                    _lb_ok = False
+                    if _lb_ok:
+                        diagnostics['model_type'] = 'logbinomial'
+                        diagnostics['cov_type'] = cov_type if use_robust else 'standard'
+                        diagnostics['aic'] = model_lb.aic
+                        diagnostics['bic'] = model_lb.bic
+                        _dbg("Log-binomial 收敛成功，替代 Poisson")
+                        return model_lb, model_lb, complete, diagnostics
+                    else:
+                        _dbg("Log-binomial 方向校验不通过，继续 Poisson")
                 else:
                     _dbg("Log-binomial 系数含 Inf/NaN，回退")
             else:
@@ -1241,8 +1284,10 @@ def compute_corrected_rr_table(df, exposure_col, outcome_col,
 
 def compute_reri(model_r1, outcome_var):
     """
-    从 R1（comorbidity_group ~ normal 参考）的 Poisson 结果计算 RERI。
+    从 R1（comorbidity_group ~ normal 参考）的 Poisson 结果计算 RERI、AP*、S。
     RERI = RR_comorbid - RR_gdm_only - RR_thyroid_only + 1
+    AP*  = RERI / (RR_comorbid - 1)   归因交互比例
+    S    = (RR_comorbid - 1) / [(RR_gdm - 1) + (RR_thyroid - 1)]  相加交互指数
     """
     params = model_r1.params
     cov    = model_r1.cov_params()
@@ -1279,19 +1324,446 @@ def compute_reri(model_r1, outcome_var):
     if not np.all(np.isfinite(rr_vals)):
         _warn(f"RERI [{outcome_var}] 跳过：RR 含 Inf/NaN (betas={betas})")
         return None
-    grad    = np.array([rr_vals[0], -rr_vals[1], -rr_vals[2]])
+
+    rr11, rr10, rr01 = rr_vals[0], rr_vals[1], rr_vals[2]
+    grad    = np.array([rr11, -rr10, -rr01])
     var_reri = grad @ cov_sub @ grad
     if var_reri <= 0:
         return None
-    reri  = rr_vals[0] - rr_vals[1] - rr_vals[2] + 1
+    reri  = rr11 - rr10 - rr01 + 1
     se    = np.sqrt(var_reri)
     z     = stats.norm.ppf(0.975)
     lcl   = reri - z * se
     ucl   = reri + z * se
     p_val = 2 * stats.norm.sf(abs(reri / se))
-    return {'RERI': reri, 'RERI_LCL': lcl, 'RERI_UCL': ucl,
-            'RERI_SE': se, 'p_reri': p_val,
-            'RR_comorbid': rr_vals[0], 'RR_gdm': rr_vals[1], 'RR_thyroid': rr_vals[2]}
+
+    # ── AP = RERI / RR11 ─────────────────────────────────
+    # AP: 共病组总风险中可归因于交互作用的比例
+    # Delta method (对 log(RR) 求导):
+    #   ∂AP/∂log(RR11) = RR11*(1-RERI)/RR11² = (1-RERI)/RR11
+    #   ∂AP/∂log(RR10) = -RR10/RR11
+    #   ∂AP/∂log(RR01) = -RR01/RR11
+    if abs(rr11) > 1e-8:
+        ap_val = reri / rr11
+        grad_ap = np.array([
+            (1.0 - reri) / rr11,
+            -rr10 / rr11,
+            -rr01 / rr11,
+        ])
+        var_ap = grad_ap @ cov_sub @ grad_ap
+        se_ap = np.sqrt(var_ap) if var_ap > 0 else np.nan
+        lcl_ap = ap_val - z * se_ap
+        ucl_ap = ap_val + z * se_ap
+        p_ap = 2 * stats.norm.sf(abs(ap_val / se_ap)) if se_ap > 0 else np.nan
+    else:
+        ap_val = np.nan; se_ap = np.nan
+        lcl_ap = np.nan; ucl_ap = np.nan; p_ap = np.nan
+
+    # ── AP* = RERI / (RR11 - 1) ──────────────────────────
+    # AP*: 共病组超额风险中可归因于交互作用的比例（更常用）
+    # Delta method (对 log(RR) 求导):
+    #   ∂AP*/∂log(RR11) = RR11*(1-RERI)/(RR11-1)²
+    #   ∂AP*/∂log(RR10) = -RR10/(RR11-1)
+    #   ∂AP*/∂log(RR01) = -RR01/(RR11-1)
+    denom_ap = rr11 - 1.0
+    if abs(denom_ap) > 1e-8:
+        ap_star = reri / denom_ap
+        grad_apstar = np.array([
+            rr11 * (1.0 - reri) / (denom_ap ** 2),
+            -rr10 / denom_ap,
+            -rr01 / denom_ap,
+        ])
+        var_apstar = grad_apstar @ cov_sub @ grad_apstar
+        se_apstar = np.sqrt(var_apstar) if var_apstar > 0 else np.nan
+        lcl_apstar = ap_star - z * se_apstar
+        ucl_apstar = ap_star + z * se_apstar
+        p_apstar = 2 * stats.norm.sf(abs(ap_star / se_apstar)) if se_apstar > 0 else np.nan
+    else:
+        ap_star = np.nan; se_apstar = np.nan
+        lcl_apstar = np.nan; ucl_apstar = np.nan; p_apstar = np.nan
+
+    # ── S = (RR11 - 1) / [(RR10 - 1) + (RR01 - 1)] ──────
+    denom_s = (rr10 - 1.0) + (rr01 - 1.0)
+    if abs(denom_s) > 1e-8:
+        s_index = (rr11 - 1.0) / denom_s
+        # Delta method for S
+        # S = f(RR11, RR10, RR01) = (RR11-1)/((RR10-1)+(RR01-1))
+        # grad_S = [1/denom_s, -(RR11-1)/denom_s^2, -(RR11-1)/denom_s^2]
+        grad_s = np.array([
+            1.0 / denom_s,
+            -(rr11 - 1.0) / (denom_s ** 2),
+            -(rr11 - 1.0) / (denom_s ** 2)
+        ])
+        var_s = grad_s @ cov_sub @ grad_s
+        se_s = np.sqrt(var_s) if var_s > 0 else np.nan
+        # S 的 CI 在 log 尺度更稳定
+        if s_index > 0:
+            log_s = np.log(s_index)
+            se_log_s = se_s / s_index
+            lcl_s = np.exp(log_s - z * se_log_s)
+            ucl_s = np.exp(log_s + z * se_log_s)
+            p_s = 2 * stats.norm.sf(abs(log_s / se_log_s)) if se_log_s > 0 else np.nan
+        else:
+            lcl_s = np.nan
+            ucl_s = np.nan
+            p_s = np.nan
+    else:
+        s_index = np.nan
+        se_s = np.nan
+        lcl_s = np.nan
+        ucl_s = np.nan
+        p_s = np.nan
+
+    result = {
+        'RERI': reri, 'RERI_LCL': lcl, 'RERI_UCL': ucl,
+        'RERI_SE': se, 'p_reri': p_val,
+        'AP': ap_val, 'AP_LCL': lcl_ap, 'AP_UCL': ucl_ap,
+        'AP_SE': se_ap, 'p_ap': p_ap,
+        'AP_star': ap_star, 'AP_star_LCL': lcl_apstar, 'AP_star_UCL': ucl_apstar,
+        'AP_star_SE': se_apstar, 'p_ap_star': p_apstar,
+        'S_index': s_index, 'S_LCL': lcl_s, 'S_UCL': ucl_s,
+        'S_SE': se_s, 'p_s_index': p_s,
+        'RR_comorbid': rr11, 'RR_gdm': rr10, 'RR_thyroid': rr01,
+    }
+    return result
+
+
+def bootstrap_reri(analysis_data, outcome_var, n_bootstrap=1000,
+                   random_seed=42, output_dir=None):
+    """
+    Bootstrap重抽样计算RERI的置信区间。
+
+    参数
+    ----
+    analysis_data : DataFrame
+    outcome_var : str - 结局变量名
+    n_bootstrap : int - Bootstrap次数
+    random_seed : int - 随机种子
+    output_dir : str - 输出目录
+
+    返回
+    ----
+    dict : {'reri_boot': array, 'ci_lower': float, 'ci_upper': float,
+            'reri_mean': float, 'reri_se': float, 'success_rate': float}
+    """
+    import os as _os
+    if output_dir is None:
+        output_dir = _os.path.join(_SCRIPT_DIR, '输出图', 'forest')
+    _os.makedirs(output_dir, exist_ok=True)
+
+    _info(f"\n  [Bootstrap RERI: {outcome_var}] n={n_bootstrap}")
+
+    df = analysis_data.copy()
+    valid_groups = ['normal', 'gdm_only', 'thyroid_only', 'comorbid']
+    df = df[df['comorbidity_group'].isin(valid_groups)].copy()
+
+    covariates = [c for c in ['age', 'ga_ogtt', 'bmi', 'year']
+                  if c in df.columns and df[c].notna().sum() > 30]
+    cov_str = " + ".join(covariates)
+
+    y = pd.to_numeric(df[outcome_var], errors='coerce')
+    valid_mask = y.notna() & df['comorbidity_group'].notna()
+    df = df[valid_mask].copy()
+    y = y[valid_mask].values
+
+    if len(df) < 100 or y.sum() < 20:
+        _warn(f"  Bootstrap跳过：样本不足或事件过少 (n={len(df)}, events={y.sum()})")
+        return None
+
+    np.random.seed(random_seed)
+    reri_boot = []
+    n_success = 0
+    n_fail = 0
+
+    formula = (f"{outcome_var} ~ "
+               f"C(comorbidity_group, Treatment('normal'))"
+               + (f" + {cov_str}" if cov_str else ""))
+
+    for i in range(n_bootstrap):
+        if (i + 1) % 200 == 0:
+            _info(f"    Bootstrap进度: {i+1}/{n_bootstrap} "
+                  f"(成功: {n_success}, 失败: {n_fail})")
+
+        idx = np.random.choice(len(df), size=len(df), replace=True)
+        boot_df = df.iloc[idx].copy()
+
+        if boot_df['comorbidity_group'].nunique() < 4:
+            n_fail += 1
+            continue
+
+        try:
+            boot_df['_y'] = y[idx]
+            boot_formula = formula.replace(outcome_var, '_y')
+            model = smf.glm(formula=boot_formula, data=boot_df,
+                           family=sm.families.Poisson())
+            result = model.fit(maxiter=100, disp=False)
+
+            params = result.params
+            cov = result.cov_params()
+
+            comorb_keys = [k for k in params.index
+                          if 'comorbidity_group' in k
+                          and not k.startswith('Intercept')]
+
+            def _find_key(substr):
+                matches = [k for k in comorb_keys
+                          if f'T.{substr}]' in k or f'[T.{substr}]' in k]
+                return matches[0] if matches else None
+
+            k_comorbid = _find_key('comorbid')
+            k_gdm = _find_key('gdm_only')
+            k_thyroid = _find_key('thyroid_only')
+
+            if not all([k_comorbid, k_gdm, k_thyroid]):
+                n_fail += 1
+                continue
+
+            keys = [k_comorbid, k_gdm, k_thyroid]
+            if not all(k in cov.index for k in keys):
+                n_fail += 1
+                continue
+
+            betas = params[keys].values
+            rr_vals = np.exp(betas)
+
+            if not np.all(np.isfinite(rr_vals)):
+                n_fail += 1
+                continue
+
+            reri_i = rr_vals[0] - rr_vals[1] - rr_vals[2] + 1
+            reri_boot.append(reri_i)
+            n_success += 1
+
+        except Exception as e:
+            n_fail += 1
+            continue
+
+    if len(reri_boot) < 100:
+        _warn(f"  Bootstrap失败过多：成功仅 {len(reri_boot)} 次")
+        return None
+
+    reri_boot = np.array(reri_boot)
+    reri_mean = np.mean(reri_boot)
+    reri_se = np.std(reri_boot)
+    ci_lower = np.percentile(reri_boot, 2.5)
+    ci_upper = np.percentile(reri_boot, 97.5)
+    success_rate = n_success / n_bootstrap
+
+    _info(f"  [Bootstrap结果: {outcome_var}]")
+    _info(f"    成功率: {success_rate:.1%} ({n_success}/{n_bootstrap})")
+    _info(f"    RERI均值: {reri_mean:.4f}")
+    _info(f"    RERI标准误: {reri_se:.4f}")
+    _info(f"    95% CI: ({ci_lower:.4f}, {ci_upper:.4f})")
+    if ci_lower > 0:
+        _info(f"    结论: CI下限 > 0 → 协同作用稳健显著")
+    else:
+        _info(f"    结论: CI下限 ≤ 0 → 显著性可能不稳健，需保守解读")
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    n_bins = min(50, max(20, len(reri_boot) // 10))
+    ax.hist(reri_boot, bins=n_bins, density=True, alpha=0.7,
+            color='steelblue', edgecolor='white', linewidth=0.5)
+
+    ax.axvline(reri_mean, color='red', linestyle='-', linewidth=2,
+               label=f'Bootstrap Mean = {reri_mean:.3f}')
+    ax.axvline(ci_lower, color='orange', linestyle='--', linewidth=1.5,
+               label=f'95% CI Lower = {ci_lower:.3f}')
+    ax.axvline(ci_upper, color='orange', linestyle='--', linewidth=1.5,
+               label=f'95% CI Upper = {ci_upper:.3f}')
+    ax.axvline(0, color='black', linestyle='-', linewidth=1, alpha=0.8)
+
+    ax.set_xlabel('RERI', fontsize=11)
+    ax.set_ylabel('Density', fontsize=11)
+    ax.set_title(f'Bootstrap Distribution of RERI for {outcome_var}\n'
+                 f'(n={n_success}, 95% CI: [{ci_lower:.3f}, {ci_upper:.3f}])',
+                 fontsize=12)
+    ax.legend(fontsize=9, loc='upper right')
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    fig_path = _os.path.join(output_dir, f'bootstrap_{outcome_var}_reri.png')
+    fig.savefig(fig_path, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+    _info(f"  Bootstrap图已保存: {fig_path}")
+
+    return {
+        'reri_boot': reri_boot,
+        'reri_mean': reri_mean,
+        'reri_se': reri_se,
+        'ci_lower': ci_lower,
+        'ci_upper': ci_upper,
+        'success_rate': success_rate,
+        'n_bootstrap': n_bootstrap,
+        'n_success': n_success,
+    }
+
+
+# ============================================================
+# ★ 模块 I2b：甲状腺功能减退严重程度亚组分析
+# ============================================================
+
+def analyze_thyroid_severity_subgroups(analysis_data, pvalue_registry=None):
+    """
+    按甲状腺功能减退严重程度分层分析，评估严重程度对共病效应的修饰作用。
+
+    亚组：
+    - overt_hypo（临床甲减）：TSH > 上限 + FT4 < 下限
+    - subclinical_hypo（亚临床甲减）：TSH > 上限 + FT4 正常
+    - isolated_hypothyroxinemia（单纯低T4血症）：TSH 正常 + FT4 < 下限
+    """
+    _sec("甲状腺功能减退严重程度亚组分析", lv=1)
+
+    if 'thyroid_severity_preogtt' not in analysis_data.columns:
+        _warn("thyroid_severity_preogtt 列不存在，跳过严重程度亚组分析")
+        return pd.DataFrame()
+
+    df = analysis_data.copy()
+    valid_groups = ['normal', 'gdm_only', 'thyroid_only', 'comorbid']
+    df = df[df['comorbidity_group'].isin(valid_groups)].copy()
+
+    covariates = [c for c in ['age', 'ga_ogtt', 'bmi', 'year']
+                  if c in df.columns and df[c].notna().sum() > 30]
+    cov_str = " + ".join(covariates)
+
+    severity_map = {
+        'overt_hypo': '临床甲减',
+        'subclinical_hypo': '亚临床甲减',
+        'isolated_hypothyroxinemia': '单纯低T4血症',
+    }
+
+    binary_outcomes = [o for o in ['nicu','preterm','macrosomia',
+                                     'delivery_mode','premature_rupture_of_membranes',
+                                     'chorioamnionitis','is_lga']
+                       if o in df.columns and _safe_binary(df[o]).notna().sum() >= 10]
+
+    results = []
+
+    for sev_key, sev_label in severity_map.items():
+        _info(f"\n  ── 亚组: {sev_label} ({sev_key}) ──")
+
+        # 该严重程度组的样本
+        sev_mask = df['thyroid_severity_preogtt'] == sev_key
+        n_sev = int(sev_mask.sum())
+        _info(f"    样本量: {n_sev}")
+
+        if n_sev < 30:
+            _info(f"    样本量不足（<30），跳过")
+            continue
+
+        # 在该严重程度亚组内，按是否共病分层
+        # 共病组 = thyroid_severity == sev_key 且 comorbidity_group == comorbid
+        # 单纯甲减组 = thyroid_severity == sev_key 且 comorbidity_group == thyroid_only
+        # 正常对照组 = comorbidity_group == normal
+        # GDM组 = comorbidity_group == gdm_only
+
+        sev_comorbid = df[sev_mask & (df['comorbidity_group'] == 'comorbid')]
+        sev_thyroid = df[sev_mask & (df['comorbidity_group'] == 'thyroid_only')]
+        normal_df = df[df['comorbidity_group'] == 'normal']
+        gdm_df = df[df['comorbidity_group'] == 'gdm_only']
+
+        n_comorbid = len(sev_comorbid)
+        n_thyroid = len(sev_thyroid)
+        n_normal = len(normal_df)
+        n_gdm = len(gdm_df)
+
+        _info(f"    共病组: {n_comorbid}  单纯甲减: {n_thyroid}  "
+              f"正常对照: {n_normal}  单纯GDM: {n_gdm}")
+
+        if n_comorbid < 10 or n_thyroid < 10:
+            _info(f"    共病组或单纯甲减组样本量不足（<10），跳过RERI计算")
+            # 仍然报告该严重程度的RR
+            if n_comorbid >= 10:
+                sub_df = pd.concat([normal_df, sev_comorbid])
+                if len(sub_df) >= 50:
+                    formula = (f"{{outcome}} ~ C(comorbidity_group, Treatment('normal'))"
+                              + (f" + {cov_str}" if cov_str else ""))
+                    for outcome in binary_outcomes:
+                        base = sub_df[[outcome, 'comorbidity_group'] + covariates].copy()
+                        base[outcome] = _safe_binary(base[outcome])
+                        base = base[base[outcome].notna()].copy()
+                        if len(base) < 50 or base[outcome].sum() < 5:
+                            continue
+                        try:
+                            fam = sm.families.Poisson()
+                            m = smf.glm(formula.format(outcome=outcome),
+                                       data=base, family=fam).fit(maxiter=100, disp=False)
+                            rr = extract_rr_results(m)
+                            c_row = rr[rr['variable'].str.contains('comorbid', na=False)]
+                            if not c_row.empty:
+                                r = c_row.iloc[0]
+                                results.append({
+                                    'severity': sev_key,
+                                    'severity_chn': sev_label,
+                                    'outcome': outcome,
+                                    'outcome_chn': _OCHN.get(outcome, outcome),
+                                    'comparison': 'comorbid_vs_normal',
+                                    'RR': r['RR'], 'RR_LCL': r['RR_LCL'], 'RR_UCL': r['RR_UCL'],
+                                    'p_value': r['p_value'],
+                                    'n_comorbid': n_comorbid,
+                                    'n_normal': n_normal,
+                                    'method': 'Poisson',
+                                })
+                        except Exception:
+                            continue
+            continue
+
+        # 对每个结局：构建2×2表并计算RR
+        for outcome in binary_outcomes:
+            base = df[[outcome, 'comorbidity_group', 'thyroid_severity_preogtt'] + covariates].copy()
+            base[outcome] = _safe_binary(base[outcome])
+            base = base[base[outcome].notna()].copy()
+
+            # 四组数据
+            g00 = base[(base['comorbidity_group'] == 'normal')]  # 无GDM无甲减
+            g10 = base[(base['comorbidity_group'] == 'gdm_only')]  # GDM无甲减
+            g01 = base[sev_mask & (base['comorbidity_group'].isin(['thyroid_only']))]  # 该严重程度甲减无GDM
+            g11 = base[sev_mask & (base['comorbidity_group'] == 'comorbid')]  # 该严重程度甲减+GDM
+
+            n00, n10, n01, n11 = len(g00), len(g10), len(g01), len(g11)
+            d00 = int(g00[outcome].sum()) if n00 > 0 else 0
+            d10 = int(g10[outcome].sum()) if n10 > 0 else 0
+            d01 = int(g01[outcome].sum()) if n01 > 0 else 0
+            d11 = int(g11[outcome].sum()) if n11 > 0 else 0
+
+            if min(n00, n10, n01, n11) < 5 or min(d00, d10, d01, d11) < 1:
+                continue
+
+            # 计算粗RR
+            r00 = d00 / n00 if n00 > 0 else np.nan
+            r10 = d10 / n10 if n10 > 0 else np.nan
+            r01 = d01 / n01 if n01 > 0 else np.nan
+            r11 = d11 / n11 if n11 > 0 else np.nan
+
+            rr_gdm = r10 / r00 if r00 > 0 else np.nan
+            rr_thyroid = r01 / r00 if r00 > 0 else np.nan
+            rr_comorbid = r11 / r00 if r00 > 0 else np.nan
+
+            reri = rr_comorbid - rr_gdm - rr_thyroid + 1 if all(np.isfinite([rr_comorbid, rr_gdm, rr_thyroid])) else np.nan
+
+            ocn = _OCHN.get(outcome, outcome)
+            _info(f"    [{ocn}] n00={n00} d00={d00} | n10={n10} d10={d10} | "
+                  f"n01={n01} d01={d01} | n11={n11} d11={d11} | "
+                  f"RERI={reri:.3f}" if np.isfinite(reri) else
+                  f"    [{ocn}] n00={n00} d00={d00} | n10={n10} d10={d10} | "
+                  f"n01={n01} d01={d01} | n11={n11} d11={d11} | RERI=NA")
+
+            results.append({
+                'severity': sev_key,
+                'severity_chn': sev_label,
+                'outcome': outcome,
+                'outcome_chn': ocn,
+                'n00': n00, 'd00': d00,
+                'n10': n10, 'd10': d10,
+                'n01': n01, 'd01': d01,
+                'n11': n11, 'd11': d11,
+                'RR_gdm': rr_gdm, 'RR_thyroid': rr_thyroid, 'RR_comorbid': rr_comorbid,
+                'RERI': reri,
+            })
+
+    result_df = pd.DataFrame(results)
+    if not result_df.empty:
+        _info(f"\n  [严重程度亚组分析汇总: {len(result_df)} 行]")
+    return result_df
 
 
 def analyze_comorbidity_groups(analysis_data, pvalue_registry=None,
@@ -1412,9 +1884,35 @@ def analyze_comorbidity_groups(analysis_data, pvalue_registry=None,
                 _info(f"    RERI={reri_v:.3f} "
                       f"({reri_res['RERI_LCL']:.3f}–{reri_res['RERI_UCL']:.3f})  "
                       f"p={reri_p:.4f}  [{nl}]{sig}")
+                _info(f"    AP ={reri_res['AP']:.3f} "
+                      f"({reri_res['AP_LCL']:.3f}–{reri_res['AP_UCL']:.3f})  "
+                      f"p={reri_res['p_ap']:.4f}")
+                _info(f"    AP*={reri_res['AP_star']:.3f} "
+                      f"({reri_res['AP_star_LCL']:.3f}–{reri_res['AP_star_UCL']:.3f})  "
+                      f"p={reri_res['p_ap_star']:.4f}")
+                _info(f"    S  ={reri_res['S_index']:.3f} "
+                      f"({reri_res['S_LCL']:.3f}–{reri_res['S_UCL']:.3f})  "
+                      f"p={reri_res['p_s_index']:.4f}")
                 reri_res.update({'outcome': outcome, 'outcome_chn': ocn,
                                  'sig': sig, 'direction': nl})
                 reri_records.append(reri_res)
+
+                if 0.01 < reri_p < 0.1:
+                    _info(f"    [Bootstrap触发] p={reri_p:.4f} 在边界区间，执行Bootstrap验证")
+                    boot_res = bootstrap_reri(df, outcome, n_bootstrap=1000,
+                                              output_dir=output_dir)
+                    if boot_res:
+                        reri_res['boot_mean'] = boot_res['reri_mean']
+                        reri_res['boot_se'] = boot_res['reri_se']
+                        reri_res['boot_ci_lower'] = boot_res['ci_lower']
+                        reri_res['boot_ci_upper'] = boot_res['ci_upper']
+                        reri_res['boot_success_rate'] = boot_res['success_rate']
+                        if boot_res['ci_lower'] > 0:
+                            reri_res['boot_conclusion'] = '稳健显著'
+                            _info(f"    [Bootstrap结论] CI下限={boot_res['ci_lower']:.3f}>0 → 协同作用稳健")
+                        else:
+                            reri_res['boot_conclusion'] = '不稳健'
+                            _info(f"    [Bootstrap结论] CI下限={boot_res['ci_lower']:.3f}≤0 → 需保守解读")
 
         # ── R2: ref = gdm_only ────────────────────────────
         sub_r2 = base[base['comorbidity_group'].isin(
@@ -2552,6 +3050,9 @@ def analyze_from_saved_data(input_file='new_preprocessed_data.xlsx',
     # ── 年份敏感性分析 ──────────────────────────────────────
     year_sensitivity_df = analyze_year_sensitivity(analysis_data, pvalue_registry)
 
+    # ── 甲状腺严重程度亚组分析 ──────────────────────────────
+    severity_subgroup_df = analyze_thyroid_severity_subgroups(analysis_data, pvalue_registry)
+
     # ── 结果输出到 Excel ───────────────────────────────────
     _sec("结果输出")
 
@@ -2565,6 +3066,35 @@ def analyze_from_saved_data(input_file='new_preprocessed_data.xlsx',
         if reri_records:
             reri_df = pd.DataFrame(reri_records)
             reri_df.to_excel(writer, sheet_name='RERI加法交互', index=False)
+
+        # Bootstrap RERI 结果写入独立UTF-8文本文件
+        boot_recs = [r for r in reri_records if r.get('boot_conclusion')]
+        if boot_recs:
+            boot_path = os.path.join(_SCRIPT_DIR, 'bootstrap_reri_results.txt')
+            with open(boot_path, 'w', encoding='utf-8') as bf:
+                bf.write("=" * 70 + "\n")
+                bf.write("Bootstrap RERI 加法交互验证结果\n")
+                bf.write(f"运行时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                bf.write("=" * 70 + "\n\n")
+                for rec in boot_recs:
+                    oc = rec.get('outcome_chn', rec.get('outcome', '?'))
+                    bf.write(f"[{oc}]\n")
+                    bf.write(f"  原始Poisson RERI: {rec['RERI']:+.4f} "
+                             f"({rec['RERI_LCL']:.4f}, {rec['RERI_UCL']:.4f})  "
+                             f"p={rec['p_reri']:.4f}\n")
+                    bf.write(f"  Bootstrap RERI均值: {rec['boot_mean']:+.4f}\n")
+                    bf.write(f"  Bootstrap标准误:   {rec['boot_se']:.4f}\n")
+                    bf.write(f"  Bootstrap 95% CI:  ({rec['boot_ci_lower']:.4f}, "
+                             f"{rec['boot_ci_upper']:.4f})\n")
+                    bf.write(f"  成功率: {rec['boot_success_rate']:.1%}\n")
+                    conc = rec['boot_conclusion']
+                    if conc == '稳健显著':
+                        bf.write(f"  结论: CI下限={rec['boot_ci_lower']:.3f}>0 → 协同作用稳健显著\n")
+                    else:
+                        bf.write(f"  结论: CI下限={rec['boot_ci_lower']:.3f}≤0 → 需保守解读\n")
+                    bf.write("\n")
+                bf.write("=" * 70 + "\n")
+            _info(f"  Bootstrap结果已写入: {boot_path}")
 
         # p 值注册表
         if pvalue_registry:
@@ -2583,6 +3113,10 @@ def analyze_from_saved_data(input_file='new_preprocessed_data.xlsx',
         if not year_sensitivity_df.empty:
             year_sensitivity_df.to_excel(writer, sheet_name='敏感性_年份', index=False)
 
+        # 甲状腺严重程度亚组分析
+        if not severity_subgroup_df.empty:
+            severity_subgroup_df.to_excel(writer, sheet_name='甲状腺严重程度亚组', index=False)
+
         # 分组分布
         group_dist = analysis_data['comorbidity_group'].value_counts(dropna=False)
         group_dist.to_excel(writer, sheet_name='分组分布')
@@ -2599,6 +3133,7 @@ def analyze_from_saved_data(input_file='new_preprocessed_data.xlsx',
             {'项目': 'Table1行数', '值': len(table1_df) if not table1_df.empty else 0},
             {'项目': '年龄亚组结果数', '值': len(age_subgroup_df) if not age_subgroup_df.empty else 0},
             {'项目': '年份敏感性结果数', '值': len(year_sensitivity_df) if not year_sensitivity_df.empty else 0},
+            {'项目': '甲状腺严重程度亚组结果数', '值': len(severity_subgroup_df) if not severity_subgroup_df.empty else 0},
             {'项目': 'p值注册数', '值': len(pvalue_registry)},
         ])
         meta.to_excel(writer, sheet_name='运行元数据', index=False)
@@ -2644,6 +3179,15 @@ def analyze_from_saved_data(input_file='new_preprocessed_data.xlsx',
                 _info(f"  {rec['outcome_chn']:12s} | RERI={rec['RERI']:+.3f} "
                       f"({rec['RERI_LCL']:.3f}–{rec['RERI_UCL']:.3f}) "
                       f"p={rec['p_reri']:.4f} [{rec['direction']}]")
+                _info(f"    AP ={rec['AP']:.3f} "
+                      f"({rec['AP_LCL']:.3f}–{rec['AP_UCL']:.3f}) "
+                      f"p={rec['p_ap']:.4f}")
+                _info(f"    AP*={rec['AP_star']:.3f} "
+                      f"({rec['AP_star_LCL']:.3f}–{rec['AP_star_UCL']:.3f}) "
+                      f"p={rec['p_ap_star']:.4f}")
+                _info(f"    S  ={rec['S_index']:.3f} "
+                      f"({rec['S_LCL']:.3f}–{rec['S_UCL']:.3f}) "
+                      f"p={rec['p_s_index']:.4f}")
     else:
         _info("\n[RERI] 无有效 RERI 结果")
 
