@@ -2,8 +2,6 @@
 comorbidity_reri_standalone.py  ——  单病 vs 共病四组对比 + RERI 加法交互 独立分析
 ==============================================================================
 
-从 GDM-Hypo数据分析主模型.py 提取的独立运行脚本，不做任何逻辑改变。
-
 目标
 ----
   R1: normal 为参考，gdm_only / thyroid_only / comorbid 的 Poisson RR
@@ -13,23 +11,19 @@ comorbidity_reri_standalone.py  ——  单病 vs 共病四组对比 + RERI 加�
 
 输入
 ----
-  preprocessed_data.xlsx（与主模型相同的预处理数据）
+  new_preprocessed_data.xlsx（与主模型相同的预处理数据）
 
 输出
 ----
-  dataset/comorbidity_results.xlsx    — 结果 Excel（多 sheet）
-  dataset/GDM甲减输出图/comorbidity_r1.png   — R1 森林图
-  dataset/GDM甲减输出图/comorbidity_r2.png   — R2 森林图
-  dataset/GDM甲减输出图/comorbidity_reri.png — RERI 图
-  dataset/comorbidity_standalone.log  — 运行日志
+  comorbidity_results.xlsx    — 结果 Excel（多 sheet）
+  输出图/comorbidity_r1.png   — R1 森林图
+  输出图/comorbidity_r2.png   — R2 森林图
+  输出图/comorbidity_reri.png — RERI 图
+  comorbidity_standalone.log  — 运行日志
 
 注意：所有函数逻辑与主模型完全一致，仅修改了输出路径和入口函数。
 """
 
-# ═══════════════════════════════════════════════════════════════
-# 修订记录
-# ═══════════════════════════════════════════════════════════════
-# 2026-07-16: 从主模型提取独立版本，仅保留共病/RERI 分析
 
 import os
 import re
@@ -77,7 +71,7 @@ def _c(t,*c): return (''.join(c)+str(t)+_E) if _sys.stdout.isatty() else str(t)
 import logging as _L, os as _O
 _SCRIPT_DIR = _O.path.dirname(_O.path.abspath(__file__))
 
-def _setup_log(f='dataset/comorbidity_standalone.log'):
+def _setup_log(f='comorbidity_standalone.log'):
     lg = _L.getLogger('comorbidity')
     if lg.handlers: return lg
     lg.setLevel(_L.DEBUG)
@@ -781,6 +775,7 @@ FDR_ALPHA_STRICT         = 0.01
 CLINICAL_RR_MIN          = 0.8
 CLINICAL_RR_MAX          = 1.2
 AGE_THRESHOLD            = 35
+HIGH_PREVALENCE_OUTCOMES = ['delivery_mode', 'premature_rupture_of_membranes']   # 高发生率结局：>20%，优先用 log-binomial
 
 ANALYSIS_FAMILY = {
     'comorbidity_vs_normal': 'primary',
@@ -1059,6 +1054,30 @@ def fit_robust_poisson(df, formula, outcome_var,
 
     _dbg(f"拟合: {formula} (n={len(complete)})")
 
+    # ========== log-binomial 尝试（高发生率结局） ==========
+    if outcome_var in HIGH_PREVALENCE_OUTCOMES:
+        _dbg(f"结局 {outcome_var} 在高发生率列表中，尝试 log-binomial 回归")
+        try:
+            model_lb = smf.glm(
+                formula=formula, data=complete,
+                family=sm.families.Binomial(link=sm.families.links.log()),
+                missing='drop'
+            ).fit(cov_type=cov_type if use_robust else 'nonrobust', maxiter=200)
+            if getattr(model_lb, 'converged', True):
+                if np.all(np.isfinite(model_lb.params)):
+                    diagnostics['model_type'] = 'logbinomial'
+                    diagnostics['cov_type'] = cov_type if use_robust else 'standard'
+                    diagnostics['aic'] = model_lb.aic
+                    diagnostics['bic'] = model_lb.bic
+                    _dbg("Log-binomial 收敛成功，替代 Poisson")
+                    return model_lb, model_lb, complete, diagnostics
+                else:
+                    _dbg("Log-binomial 系数含 Inf/NaN，回退")
+            else:
+                _dbg("Log-binomial 未收敛，回退")
+        except Exception as e:
+            _dbg(f"Log-binomial 失败: {e}，继续 Poisson")
+
     try:
         model_plain = smf.glm(
             formula=formula, data=complete,
@@ -1282,7 +1301,7 @@ def analyze_comorbidity_groups(analysis_data, pvalue_registry=None,
     """
     import os as _os
     if output_dir is None:
-        output_dir = _os.path.join(_SCRIPT_DIR, 'dataset/GDM甲减输出图', 'forest')
+        output_dir = _os.path.join(_SCRIPT_DIR, '输出图', 'forest')
     _os.makedirs(output_dir, exist_ok=True)
 
     _sec("目标 1：单病 vs 共病 四组对比", lv=1)
@@ -1562,11 +1581,18 @@ def _draw_r1_forest(comorb_df, outcome_list, output_dir):
     ax.text(-0.02, header_y, 'Outcome',
             transform=ya_tr, va='bottom', ha='right',
             fontsize=10, fontweight='bold', color='#333333', clip_on=False)
+    _METHOD_SHORT = {'logbinomial': 'LB', 'poisson': 'Poisson', 'negbin': 'NB'}
+    _METHOD_COLOR = {'logbinomial': '#d6604d', 'poisson': '#888888', 'negbin': '#888888'}
+    n_panels = len(PANEL_CONFIG)
     for ci, pcfg in enumerate(PANEL_CONFIG):
         col_x = 1.02 + ci * 0.24
         ax.text(col_x, header_y, pcfg['label'],
                 transform=ya_tr, va='bottom', ha='left',
                 fontsize=9, fontweight='bold', color=pcfg['color'], clip_on=False)
+    col_x_model = 1.02 + n_panels * 0.24
+    ax.text(col_x_model, header_y, 'Model',
+            transform=ya_tr, va='bottom', ha='left',
+            fontsize=9, fontweight='bold', color='#666666', clip_on=False)
     ax.axhline(header_y - 0.08, color='#999999', linewidth=1.0,
                xmin=-1.0, xmax=2.0, clip_on=False, zorder=0)
 
@@ -1581,6 +1607,7 @@ def _draw_r1_forest(comorb_df, outcome_list, output_dir):
             ax.axhspan(y - ROW_H * 0.42, y + ROW_H * 0.42,
                        facecolor='#f5f5f5', alpha=0.55, zorder=0, linewidth=0)
 
+        method_for_outcome = None
         for ci, pcfg in enumerate(PANEL_CONFIG):
             panel_data = comorb_df[comorb_df['comparison'] == pcfg['comparison']]
             row = panel_data[panel_data['outcome'] == outcome]
@@ -1593,6 +1620,8 @@ def _draw_r1_forest(comorb_df, outcome_list, output_dir):
             pv  = float(r.get('p_value', np.nan))
             if np.isnan(rr):
                 continue
+            if method_for_outcome is None:
+                method_for_outcome = r.get('method', '')
 
             dy = (ci - 1) * VERT_OFFSET
             yy = y + dy
@@ -1628,6 +1657,14 @@ def _draw_r1_forest(comorb_df, outcome_list, output_dir):
                     color=pcfg['color'] if sig else '#888888',
                     clip_on=False)
 
+        if method_for_outcome:
+            m_short = _METHOD_SHORT.get(method_for_outcome, method_for_outcome)
+            m_color = _METHOD_COLOR.get(method_for_outcome, '#666666')
+            ax.text(col_x_model, y, m_short,
+                    transform=ya_tr, va='center', ha='left',
+                    fontsize=7.5, color=m_color, fontweight='bold',
+                    clip_on=False)
+
     ax.set_ylim(-0.8, n_out * ROW_H + 0.5)
 
     nice_ticks = [x for x in [0.2, 0.5, 0.6, 1.0, 2.0, 3.0, 5.0]
@@ -1649,6 +1686,10 @@ def _draw_r1_forest(comorb_df, outcome_list, output_dir):
         Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
                markeredgecolor='#777777', markeredgewidth=1.5,
                markersize=7, label='p \u2265 0.05 (open)'),
+        Line2D([0], [0], marker='s', color='w', markerfacecolor='#d6604d',
+               markersize=7, label='LB = log-binomial'),
+        Line2D([0], [0], marker='s', color='w', markerfacecolor='#888888',
+               markersize=7, label='Poisson / NB'),
     ]
     ax.legend(handles=legend_handles, fontsize=8, ncol=2,
               loc='upper right', framealpha=0.92, edgecolor='#cccccc',
@@ -1702,11 +1743,18 @@ def _draw_r2_forest(comorb_df, outcome_list, output_dir):
     ax.text(-0.02, header_y, 'Outcome',
             transform=ya_tr, va='bottom', ha='right',
             fontsize=10, fontweight='bold', color='#333333', clip_on=False)
+    _METHOD_SHORT = {'logbinomial': 'LB', 'poisson': 'Poisson', 'negbin': 'NB'}
+    _METHOD_COLOR = {'logbinomial': '#d6604d', 'poisson': '#888888', 'negbin': '#888888'}
+    n_panels = len(PANEL_CONFIG)
     for ci, pcfg in enumerate(PANEL_CONFIG):
         col_x = 1.02 + ci * 0.24
         ax.text(col_x, header_y, pcfg['label'],
                 transform=ya_tr, va='bottom', ha='left',
                 fontsize=9, fontweight='bold', color=pcfg['color'], clip_on=False)
+    col_x_model = 1.02 + n_panels * 0.24
+    ax.text(col_x_model, header_y, 'Model',
+            transform=ya_tr, va='bottom', ha='left',
+            fontsize=9, fontweight='bold', color='#666666', clip_on=False)
     ax.axhline(header_y - 0.08, color='#999999', linewidth=1.0,
                xmin=-1.0, xmax=2.0, clip_on=False, zorder=0)
 
@@ -1721,6 +1769,7 @@ def _draw_r2_forest(comorb_df, outcome_list, output_dir):
             ax.axhspan(y - ROW_H * 0.42, y + ROW_H * 0.42,
                        facecolor='#f5f5f5', alpha=0.55, zorder=0, linewidth=0)
 
+        method_for_outcome = None
         for ci, pcfg in enumerate(PANEL_CONFIG):
             panel_data = comorb_df[comorb_df['comparison'] == pcfg['comparison']]
             row = panel_data[panel_data['outcome'] == outcome]
@@ -1733,6 +1782,8 @@ def _draw_r2_forest(comorb_df, outcome_list, output_dir):
             pv  = float(r.get('p_value', np.nan))
             if np.isnan(rr):
                 continue
+            if method_for_outcome is None:
+                method_for_outcome = r.get('method', '')
 
             dy = (ci - 0.5) * VERT_OFFSET * 2
             yy = y + dy
@@ -1768,6 +1819,14 @@ def _draw_r2_forest(comorb_df, outcome_list, output_dir):
                     color=pcfg['color'] if sig else '#888888',
                     clip_on=False)
 
+        if method_for_outcome:
+            m_short = _METHOD_SHORT.get(method_for_outcome, method_for_outcome)
+            m_color = _METHOD_COLOR.get(method_for_outcome, '#666666')
+            ax.text(col_x_model, y, m_short,
+                    transform=ya_tr, va='center', ha='left',
+                    fontsize=7.5, color=m_color, fontweight='bold',
+                    clip_on=False)
+
     ax.set_ylim(-0.8, n_out * ROW_H + 0.5)
 
     nice_ticks = [x for x in [0.2, 0.5, 0.6, 1.0, 2.0, 3.0, 5.0]
@@ -1789,6 +1848,10 @@ def _draw_r2_forest(comorb_df, outcome_list, output_dir):
         Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
                markeredgecolor='#777777', markeredgewidth=1.5,
                markersize=7, label='p \u2265 0.05 (open)'),
+        Line2D([0], [0], marker='s', color='w', markerfacecolor='#d6604d',
+               markersize=7, label='LB = log-binomial'),
+        Line2D([0], [0], marker='s', color='w', markerfacecolor='#888888',
+               markersize=7, label='Poisson / NB'),
     ]
     ax.legend(handles=legend_handles, fontsize=8, ncol=2,
               loc='upper right', framealpha=0.92, edgecolor='#cccccc',
@@ -2317,8 +2380,8 @@ def analyze_year_sensitivity(analysis_data, pvalue_registry=None):
 # 入口函数
 # ============================================================
 
-def analyze_from_saved_data(input_file='dataset/preprocessed_data.xlsx',
-                             output_file='dataset/comorbidity_results.xlsx'):
+def analyze_from_saved_data(input_file='new_preprocessed_data.xlsx',
+                             output_file='comorbidity_results.xlsx'):
     _info("\n"+"\u2550"*58)
     _info(_c("  单病 vs 共病 + RERI 独立分析  启动",_B))
     _info("\u2550"*58)
@@ -2478,7 +2541,7 @@ def analyze_from_saved_data(input_file='dataset/preprocessed_data.xlsx',
 
     comorbidity_df, reri_records = analyze_comorbidity_groups(
         analysis_data, pvalue_registry=pvalue_registry,
-        output_dir=os.path.join(_SCRIPT_DIR, 'dataset/GDM甲减输出图', 'forest'))
+        output_dir=os.path.join(_SCRIPT_DIR, '输出图', 'forest'))
 
     # ── Table 1：基线特征表 ────────────────────────────────
     table1_df = generate_table1(analysis_data, group_col='comorbidity_group')
@@ -2593,6 +2656,6 @@ def analyze_from_saved_data(input_file='dataset/preprocessed_data.xlsx',
 
 if __name__ == '__main__':
     base_dir    = os.path.dirname(os.path.abspath(__file__))
-    input_file  = os.path.join(base_dir, 'dataset/preprocessed_data.xlsx')
-    output_file = os.path.join(base_dir, 'dataset/comorbidity_results.xlsx')
+    input_file  = os.path.join(base_dir, 'new_preprocessed_data.xlsx')
+    output_file = 'comorbidity_results.xlsx'
     analyze_from_saved_data(input_file, output_file)
