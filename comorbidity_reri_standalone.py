@@ -11,15 +11,15 @@ comorbidity_reri_standalone.py  ——  单病 vs 共病四组对比 + RERI 加�
 
 输入
 ----
-  new_preprocessed_data.xlsx（与主模型相同的预处理数据）
+  dataset/preprocessed_data.xlsx（与主模型相同的预处理数据）
 
 输出
 ----
-  comorbidity_results.xlsx    — 结果 Excel（多 sheet）
-  输出图/comorbidity_r1.png   — R1 森林图
-  输出图/comorbidity_r2.png   — R2 森林图
-  输出图/comorbidity_reri.png — RERI 图
-  comorbidity_standalone.log  — 运行日志
+  dataset/comorbidity_results.xlsx    — 结果 Excel（多 sheet）
+  dataset/GDM甲减输出图/comorbidity_r1.png   — R1 森林图
+  dataset/GDM甲减输出图/comorbidity_r2.png   — R2 森林图
+  dataset/GDM甲减输出图/comorbidity_reri.png — RERI 图
+  dataset/comorbidity_standalone.log  — 运行日志
 
 注意：所有函数逻辑与主模型完全一致，仅修改了输出路径和入口函数。
 """
@@ -71,7 +71,7 @@ def _c(t,*c): return (''.join(c)+str(t)+_E) if _sys.stdout.isatty() else str(t)
 import logging as _L, os as _O
 _SCRIPT_DIR = _O.path.dirname(_O.path.abspath(__file__))
 
-def _setup_log(f='comorbidity_standalone.log'):
+def _setup_log(f='dataset/comorbidity_standalone.log'):
     lg = _L.getLogger('comorbidity')
     if lg.handlers: return lg
     lg.setLevel(_L.DEBUG)
@@ -1448,7 +1448,7 @@ def bootstrap_reri(analysis_data, outcome_var, n_bootstrap=1000,
     """
     import os as _os
     if output_dir is None:
-        output_dir = _os.path.join(_SCRIPT_DIR, '输出图', 'forest')
+        output_dir = _os.path.join(_SCRIPT_DIR, 'dataset/GDM甲减输出图', 'forest')
     _os.makedirs(output_dir, exist_ok=True)
 
     _info(f"\n  [Bootstrap RERI: {outcome_var}] n={n_bootstrap}")
@@ -1773,7 +1773,7 @@ def analyze_comorbidity_groups(analysis_data, pvalue_registry=None,
     """
     import os as _os
     if output_dir is None:
-        output_dir = _os.path.join(_SCRIPT_DIR, '输出图', 'forest')
+        output_dir = _os.path.join(_SCRIPT_DIR, 'dataset/GDM甲减输出图', 'forest')
     _os.makedirs(output_dir, exist_ok=True)
 
     _sec("目标 1：单病 vs 共病 四组对比", lv=1)
@@ -2878,8 +2878,8 @@ def analyze_year_sensitivity(analysis_data, pvalue_registry=None):
 # 入口函数
 # ============================================================
 
-def analyze_from_saved_data(input_file='new_preprocessed_data.xlsx',
-                             output_file='comorbidity_results.xlsx'):
+def analyze_from_saved_data(input_file='dataset/preprocessed_data.xlsx',
+                             output_file='dataset/comorbidity_results.xlsx'):
     _info("\n"+"\u2550"*58)
     _info(_c("  单病 vs 共病 + RERI 独立分析  启动",_B))
     _info("\u2550"*58)
@@ -3039,7 +3039,7 @@ def analyze_from_saved_data(input_file='new_preprocessed_data.xlsx',
 
     comorbidity_df, reri_records = analyze_comorbidity_groups(
         analysis_data, pvalue_registry=pvalue_registry,
-        output_dir=os.path.join(_SCRIPT_DIR, '输出图', 'forest'))
+        output_dir=os.path.join(_SCRIPT_DIR, 'dataset/GDM甲减输出图', 'forest'))
 
     # ── Table 1：基线特征表 ────────────────────────────────
     table1_df = generate_table1(analysis_data, group_col='comorbidity_group')
@@ -3200,6 +3200,6 @@ def analyze_from_saved_data(input_file='new_preprocessed_data.xlsx',
 
 if __name__ == '__main__':
     base_dir    = os.path.dirname(os.path.abspath(__file__))
-    input_file  = os.path.join(base_dir, 'new_preprocessed_data.xlsx')
-    output_file = 'comorbidity_results.xlsx'
+    input_file  = os.path.join(base_dir, 'dataset/preprocessed_data.xlsx')
+    output_file = 'dataset/comorbidity_results.xlsx'
     analyze_from_saved_data(input_file, output_file)
